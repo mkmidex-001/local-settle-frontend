@@ -36,6 +36,17 @@ export function CreateOfferModal({ onClose }: CloseModalProps) {
 
     const [checked, setChecked] = useState<string[]>([]);
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const selectedPaymentMethodNames = [
+        ...(currentUser?.paymentMethods ?? []).map((pm) => ({
+            id: String(pm.paymentId ?? pm.payment_id ?? pm.id ?? ""),
+            name: pm.payment_provider?.name || pm.paymentProvider?.name || pm.bankName || pm.type || "Payment Method",
+        })),
+        ...(currentUser?.payment_method ?? []).map((pm) => ({
+            id: String(pm.payment_id ?? pm.paymentId ?? pm.id ?? ""),
+            name: pm.payment_provider?.name || pm.paymentProvider?.name || pm.type || "Payment Method",
+        })),
+    ].filter((method) => checked.includes(method.id)).map((method) => method.name);
+    const [validationError, setValidationError] = useState("");
     const handleTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
         const nextIndex = getRovingFocusIndex(event.key, index, offerTypeTabs.length, "horizontal");
         if (nextIndex === null) return;
@@ -63,6 +74,27 @@ export function CreateOfferModal({ onClose }: CloseModalProps) {
             alert("KYC verification required to publish offers.");
             return;
         }
+
+        const price = Number(form.price);
+        const minAmount = Number(form.minAmount);
+        const maxAmount = Number(form.maxAmount);
+        if (![price, minAmount, maxAmount].every(Number.isFinite) || price <= 0 || minAmount <= 0 || maxAmount <= 0) {
+            setValidationError("Enter a positive price and positive minimum and maximum amounts.");
+            return;
+        }
+        if (minAmount > maxAmount) {
+            setValidationError("Minimum amount cannot exceed maximum amount.");
+            return;
+        }
+        if ([form.price, form.minAmount, form.maxAmount].some(value => !/^\d+(\.\d{1,7})?$/.test(value))) {
+            setValidationError("Price and amounts can have at most 7 decimal places.");
+            return;
+        }
+        if (checked.length === 0) {
+            setValidationError("Select at least one payment method.");
+            return;
+        }
+        setValidationError("");
 
         setIsSubmitting(true);
         try {
@@ -103,7 +135,7 @@ export function CreateOfferModal({ onClose }: CloseModalProps) {
                         </div>
                         <h3 className="text-[#55D6BE] font-semibold text-xl tracking-wide animate-pulse mb-2">Creating Offer...</h3>
                         <p className="text-gray-400 text-sm text-center max-w-[280px] px-4 leading-relaxed">
-                            Please wait while we process your request and secure your offer details in the blockchain.
+                            Please wait while we publish your USDC offer terms. This does not move local currency.
                         </p>
                     </div>
                 )}
@@ -124,6 +156,7 @@ export function CreateOfferModal({ onClose }: CloseModalProps) {
 
                 <div className="w-99.75 h-12">
                     <form onSubmit={handleSubmit}>
+                        {validationError && <p role="alert" className="mb-3 text-sm text-red-400">{validationError}</p>}
                         <div>
                             <p className="text-[#64748B]">Offer type</p>
                             <div className="flex flex-col h-full items-center justify-center mb-6">
@@ -172,11 +205,15 @@ export function CreateOfferModal({ onClose }: CloseModalProps) {
                             <p className="text-[#64748B] text-[11px] mt-2 leading-relaxed">
                                 Currently our system only supports fund locking of USDC. Please swap your assets if required.
                             </p>
+                            <p className="mt-2 rounded-lg border border-[#55D6BE]/20 bg-[#11212E] p-3 text-xs leading-relaxed text-[#CBD5E1]">
+                                USDC is the on-chain escrow asset. Buyer and seller arrange and verify local payment directly; LocalSettle does not transfer fiat or promise automatic refunds.
+                            </p>
                         </div>
                         <div className='mt-3'>
                             <p className="text-[#CBD5E1]">Price per Unit</p>
                             <div className="relative mt-3">
                                 <input
+                                    aria-label="Price per Unit"
                                     type="number"
                                     name='price'
                                     value={form.price}
@@ -203,6 +240,7 @@ export function CreateOfferModal({ onClose }: CloseModalProps) {
                                 <p className="text-[#CBD5E1]">Min Amount</p>
                                 <div className="relative mt-3">
                                     <input
+                                        aria-label="Minimum amount"
                                         type="number"
                                         name='minAmount'
                                         value={form.minAmount}
@@ -222,6 +260,7 @@ export function CreateOfferModal({ onClose }: CloseModalProps) {
                                 <p className="text-[#CBD5E1]">Max Amount</p>
                                 <div className="relative mt-3">
                                     <input
+                                        aria-label="Maximum amount"
                                         type="number"
                                         name='maxAmount'
                                         value={form.maxAmount}
@@ -312,6 +351,13 @@ export function CreateOfferModal({ onClose }: CloseModalProps) {
                                 )}
                             </div>
                         </div>
+                        <section aria-label="Offer review" className="mt-5 rounded-xl border border-white/10 bg-[#11212E] p-4 text-sm text-[#CBD5E1]">
+                            <h3 className="mb-2 font-semibold text-white">Review your offer</h3>
+                            <p>{tab} {usdcAsset.value} at {form.price || "—"} USD per USDC</p>
+                            <p>Trade range: {form.minAmount || "—"} to {form.maxAmount || "—"} USDC</p>
+                            <p>Local payment methods: {selectedPaymentMethodNames.length ? selectedPaymentMethodNames.join(", ") : "None selected"}</p>
+                            <p className="mt-2 text-xs leading-relaxed text-[#94A3B8]">Only USDC is locked in escrow. Local currency is paid directly between participants.</p>
+                        </section>
                         <div className="flex w-full items-center justify-center gap-3 mt-10">
                             <button
                                 type='submit'

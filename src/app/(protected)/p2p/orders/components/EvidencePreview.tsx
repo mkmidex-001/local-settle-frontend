@@ -8,6 +8,8 @@ import { useSignatureCancellation } from "@/features/wallet/hooks/useSignatureCa
 import { CircleCheck, Loader2, Eye, Search } from "lucide-react";
 import { SignatureCancelledModal } from "../../components/SignatureCancelledModal";
 import { useNotifications } from "@/features/notifications";
+import { escrowErrorGuidance } from "@/features/escrow/utils/escrow-error-guidance";
+import { ApiError } from "@/lib/api";
 
 export interface EvidencePreviewProps {
     orderId: string;
@@ -18,9 +20,11 @@ export interface EvidencePreviewProps {
     expiresAt?: string;
     evidenceUrl?: string | null;
     onStatusChange: () => void;
+    refreshStatus: () => Promise<string | null | undefined>;
     canCancel: boolean;
     isCancelling: boolean;
     onCancelOrder: () => void;
+    orderExpired?: boolean;
 }
 
 export function EvidencePreview({
@@ -32,9 +36,11 @@ export function EvidencePreview({
     expiresAt,
     evidenceUrl,
     onStatusChange,
+    refreshStatus,
     canCancel,
     isCancelling,
-    onCancelOrder
+    onCancelOrder,
+    orderExpired = false,
 }: EvidencePreviewProps) {
     const { fundEscrow, releaseEscrow, syncEscrow } = useEscrows();
     const { updateOrder } = useOrders();
@@ -43,12 +49,23 @@ export function EvidencePreview({
     const [timeLeft, setTimeLeft] = useState<string>("00:00");
     const [isExpired, setIsExpired] = useState(false);
     const [pendingAction, setPendingAction] = useState<"fund" | "release" | null>(null);
+    const [awaitingFunding, setAwaitingFunding] = useState(false);
     const { notify } = useNotifications();
     const sig = useSignatureCancellation();
 
     useEffect(() => {
-        if (!expiresAt) return;
-        const target = new Date(expiresAt).getTime();
+        if (escrowStatus === "funded" || escrowStatus === "fiat_sent" || escrowStatus === "released") {
+            setAwaitingFunding(false);
+        }
+    }, [escrowStatus]);
+
+    useEffect(() => {
+        const target = expiresAt ? Date.parse(expiresAt) : Number.NaN;
+        if (!Number.isFinite(target)) {
+            setTimeLeft("--:--");
+            setIsExpired(false);
+            return;
+        }
         
         const updateTimer = () => {
             const now = Date.now();
@@ -66,11 +83,18 @@ export function EvidencePreview({
         
         updateTimer();
         const interval = setInterval(updateTimer, 1000);
-        return () => clearInterval(interval);
+        const refresh = () => updateTimer();
+        document.addEventListener("visibilitychange", refresh);
+        window.addEventListener("focus", refresh);
+        return () => {
+            clearInterval(interval);
+            document.removeEventListener("visibilitychange", refresh);
+            window.removeEventListener("focus", refresh);
+        };
     }, [expiresAt]);
 
     const handleFundAction = async () => {
-        if (isSubmitting || !sellerAddress || !escrowId){
+        if (orderExpired || isSubmitting || !sellerAddress || !escrowId){
             alert("Cannot fund escrow: missing required information.");
             console.warn("Fund action blocked due to missing data:", { sellerAddress, escrowId });
             return;
@@ -83,22 +107,27 @@ export function EvidencePreview({
             if (!fundXdr) throw new Error("Funding failed: no unsigned XDR returned");
             const signedXdr = await sig.sign(fundXdr);
             await syncEscrow({ escrowId, action: "fund", signedXdr });
-            await updateOrder({ orderStatus: "locked" }, orderId);
-            notify("success", "Escrow funded successfully on-chain!");
+            setAwaitingFunding(true);
+            notify("info", "Funding submitted. Waiting for on-chain confirmation before payment instructions are available.");
             onStatusChange();
         } catch (err: unknown) {
             if (isSignatureCancelled(err)) {
                 setPendingAction("fund");
                 return;
             }
-            alert(`Error: ${err instanceof Error ? err.message : String(err)}`);
+            if (err instanceof ApiError && err.status === 409) {
+                notify("warning", "This order changed or expired. Refreshing its latest status.");
+                await onStatusChange();
+                return;
+            }
+            notify("error", escrowErrorGuidance(err));
         } finally {
             setIsSubmitting(false);
         }
     };
 
     const handleReleaseAction = async () => {
-        if (isSubmitting || !sellerAddress || !escrowId) return;
+        if (orderExpired || isSubmitting || !sellerAddress || !escrowId) return;
         setIsSubmitting(true);
         try {
             const res = await releaseEscrow({ escrowId, releaseSigner: sellerAddress });
@@ -116,7 +145,12 @@ export function EvidencePreview({
                 setPendingAction("release");
                 return;
             }
-            alert(`Error releasing crypto: ${err instanceof Error ? err.message : String(err)}`);
+            if (err instanceof ApiError && err.status === 409) {
+                notify("warning", "This order changed or expired. Refreshing its latest status.");
+                await onStatusChange();
+                return;
+            }
+            notify("error", escrowErrorGuidance(err));
         } finally {
             setIsSubmitting(false);
         }
@@ -128,14 +162,27 @@ export function EvidencePreview({
     };
 
     const handleSignatureRetry = async () => {
-        if (!escrowId || !pendingAction) return;
+        if (orderExpired || !escrowId || !pendingAction) return;
         setIsSubmitting(true);
         try {
+            const status = await refreshStatus();
+            const alreadyComplete = pendingAction === "fund" ? status === "funded" : status === "released";
+            if (alreadyComplete) {
+                setPendingAction(null);
+                await onStatusChange();
+                notify("success", "The escrow already reflects this action; no second transaction was sent.");
+                return;
+            }
+            const expected = pendingAction === "fund" ? ["pending", "initialized"] : ["fiat_sent"];
+            if (!status || !expected.includes(status)) {
+                notify("warning", "Escrow status could not confirm that retrying is safe. Refresh the trade before signing again.");
+                return;
+            }
             const signedXdr = await sig.retry();
             if (pendingAction === "fund") {
                 await syncEscrow({ escrowId, action: "fund", signedXdr });
-                await updateOrder({ orderStatus: "locked" }, orderId);
-                notify("success", "Escrow funded successfully on-chain!");
+                setAwaitingFunding(true);
+                notify("info", "Funding submitted. Waiting for on-chain confirmation before payment instructions are available.");
             } else {
                 await syncEscrow({ escrowId, action: "release", signedXdr });
                 await updateOrder({ orderStatus: "released" }, orderId);
@@ -147,7 +194,13 @@ export function EvidencePreview({
             if (isSignatureCancelled(err)) {
                 return;
             }
-            alert(`Error: ${err instanceof Error ? err.message : String(err)}`);
+            if (err instanceof ApiError && err.status === 409) {
+                notify("warning", "This order changed or expired. Refreshing its latest status.");
+                await onStatusChange();
+                setPendingAction(null);
+                return;
+            }
+            notify("error", escrowErrorGuidance(err));
             setPendingAction(null);
         } finally {
             setIsSubmitting(false);
@@ -181,11 +234,11 @@ export function EvidencePreview({
             {/* Minimalist Central Body View Area */}
             <div className="flex-1 flex flex-col justify-center items-center gap-4 shrink-0 min-h-0 w-full h-50">
                 {isUnfunded && (
-                    <div className="w-full flex flex-col items-center justify-center h-full border border-white/[0.02] bg-[#0D1D2C]/40 rounded-[12px] p-4 text-center">
+                    <div role={awaitingFunding ? "status" : undefined} aria-live={awaitingFunding ? "polite" : undefined} className="w-full flex flex-col items-center justify-center h-full border border-white/[0.02] bg-[#0D1D2C]/40 rounded-[12px] p-4 text-center">
                         <span className="text-3xl mb-2">🔒</span>
-                        <p className="text-[15px] font-bold text-[#C2C7D0]">Escrow Contract Awaiting Funds</p>
+                        <p className="text-[15px] font-bold text-[#C2C7D0]">{awaitingFunding ? "Funding Submitted — Awaiting Confirmation" : "Escrow Contract Awaiting Funds"}</p>
                         <p className="text-[12px] text-[rgba(155,171,183,0.8)] mt-1 max-w-[240px]">
-                            Lock your assets in escrow to establish a secure trading environment.
+                            {awaitingFunding ? "Do not send fiat yet. Payment instructions will be available after the network confirms escrow funding." : "Lock your assets in escrow to establish a secure trading environment."}
                         </p>
                     </div>
                 )}
@@ -300,11 +353,11 @@ export function EvidencePreview({
                     <button 
                         type="button" 
                         onClick={handleFundAction}
-                        disabled={isSubmitting}
+                        disabled={orderExpired || isSubmitting || awaitingFunding}
                         className="bg-[#55D6BE] w-full h-[56px] text-[#081521] font-extrabold text-[16px] leading-[24px] rounded-[12px] hover:bg-[#dcff15] hover:cursor-pointer uppercase transition-all duration-200 disabled:opacity-50 flex items-center justify-center gap-2 tracking-[-0.4px]"
                     >
                         {isSubmitting ? <Loader2 className="w-5 h-5 text-[#081521] animate-spin" /> : <CircleCheck className="w-5 h-5 text-[#081521] stroke-[3px]" />}
-                        {isSubmitting ? "PROCESSING..." : "FUND ESCROW"}
+                        {isSubmitting ? "PROCESSING..." : awaitingFunding ? "WAITING FOR CONFIRMATION" : "FUND ESCROW"}
                     </button>
                 ) : isWaitingForBuyer ? (
                     isExpired ? (
@@ -321,7 +374,7 @@ export function EvidencePreview({
                     <button 
                         type="button" 
                         onClick={handleReleaseAction}
-                        disabled={isSubmitting}
+                        disabled={orderExpired || isSubmitting}
                         className="bg-[#55D6BE] w-full h-[56px] text-[#081521] font-extrabold text-[16px] leading-[24px] rounded-[12px] hover:bg-[#38B99F] uppercase transition-all duration-200 disabled:opacity-50 flex items-center justify-center gap-2 tracking-[-0.4px]"
                     >
                         {isSubmitting ? <Loader2 className="w-5 h-5 text-[#081521] animate-spin" /> : <CircleCheck className="w-5 h-5 text-[#081521] stroke-[3px]" />}
@@ -338,7 +391,7 @@ export function EvidencePreview({
                     <button 
                         type="button" 
                         onClick={handleCancel}
-                        disabled={!canCancel || isCancelling}
+                        disabled={!canCancel || orderExpired || isCancelling}
                         className="bg-transparent hover:bg-[#FF6B6B]/5 hover:border-[#FF6B6B]/50 hover:text-[#FF6B6B] disabled:hover:bg-transparent disabled:hover:border-[rgba(69,73,50,0.3)] disabled:hover:text-[#C2C7D0] w-full h-[58px] text-[#C2C7D0] border border-[rgba(69,73,50,0.3)] font-bold text-[16px] leading-[24px] rounded-[12px] uppercase transition-all duration-200 tracking-[-0.4px] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                         {isCancelling ? "CANCELLING..." : "CANCEL OPERATION"}

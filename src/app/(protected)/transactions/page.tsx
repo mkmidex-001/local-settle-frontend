@@ -8,11 +8,13 @@ import { Aside } from "@/app/components/Aside";
 import { Header } from "@/app/components/Header";
 import { TransactionExportMenu } from "@/features/transactions/components/TransactionExportMenu";
 import { transactionExportService } from "@/features/transactions/services/transaction-export.service";
+import type { ExportTransactionRecord } from "@/features/transactions/types/transaction-export.types";
 import { ShoppingCart, TrendingUp, ChevronRight, Loader2 } from "lucide-react";
+import { formatAssetAmount, formatFiatAmount } from "@/lib/formatCurrency";
 
 export default function TransactionsPage() {
     const { currentUser } = useUser();
-    const { orders, fetchUserOrders } = useOrders();
+    const { orders, fetchUserOrders, error: ordersError, refetch } = useOrders();
     const [loading, setLoading] = useState(true);
     const router = useRouter();
 
@@ -22,6 +24,18 @@ export default function TransactionsPage() {
     const [operationFilter, setOperationFilter] = useState("All");
     const [startDateFilter, setStartDateFilter] = useState("");
     const [endDateFilter, setEndDateFilter] = useState("");
+    const exportFields: { key: keyof ExportTransactionRecord; label: string }[] = [
+        { key: "orderId", label: "Order ID" }, { key: "date", label: "Date" }, { key: "role", label: "Role" }, { key: "assetCode", label: "Asset" },
+        { key: "assetAmount", label: "Asset amount" }, { key: "fiatAmount", label: "Fiat amount" },
+        { key: "fiatCurrency", label: "Fiat currency" }, { key: "exchangeRate", label: "Exchange rate" },
+        { key: "counterpartyAlias", label: "Counterparty alias" }, { key: "sourceAddress", label: "Your address" },
+        { key: "counterpartyAddress", label: "Counterparty address" }, { key: "transactionHash", label: "Transaction hash" },
+        { key: "paymentMethod", label: "Payment method" }, { key: "status", label: "Status" },
+    ];
+    const [selectedExportFields, setSelectedExportFields] = useState<(keyof ExportTransactionRecord)[]>(exportFields.map(field => field.key));
+    const [assetFilter, setAssetFilter] = useState("ALL");
+    const [page, setPage] = useState(1);
+    const pageSize = 10;
     useEffect(() => {
         // Stop loading if no user is logged in after a short wait (allowing context initialization)
         const timer = setTimeout(() => {
@@ -43,6 +57,12 @@ export default function TransactionsPage() {
         fetchUserOrders(currentUser.userId).finally(() => {
             clearTimeout(timer);
             if (active) setLoading(false);
+        }).sort((a, b) => {
+            const timeDiff = new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+            if (timeDiff !== 0) return timeDiff;
+            const txA = a.escrow?.txHashRelease || a.escrow?.txHashLock || "";
+            const txB = b.escrow?.txHashRelease || b.escrow?.txHashLock || "";
+            return txA.localeCompare(txB) || a.orderId.localeCompare(b.orderId);
         });
 
         return () => {
@@ -73,6 +93,9 @@ export default function TransactionsPage() {
                 return false;
             }
 
+            const assetCode = o.offer?.assetCode || o.assetCode || "USDC";
+            if (assetFilter !== "ALL" && assetCode !== assetFilter) return false;
+
             // 3. Date Range Filter
             if (o.createdAt) {
                 const orderTime = new Date(o.createdAt).getTime();
@@ -88,7 +111,16 @@ export default function TransactionsPage() {
 
             return true;
         });
-    }, [orders, currentUser, operationFilter, statusFilter, startDateFilter, endDateFilter]);
+    }, [orders, currentUser, operationFilter, statusFilter, startDateFilter, endDateFilter, assetFilter]);
+
+    const availableAssets = Array.from(new Set(orders.map(o => o.offer?.assetCode || o.assetCode || "USDC"))).sort();
+    const pageCount = Math.max(1, Math.ceil(filteredOrders.length / pageSize));
+    const pageOrders = filteredOrders.slice((page - 1) * pageSize, page * pageSize);
+    useEffect(() => { setPage(1); }, [assetFilter, statusFilter, operationFilter, startDateFilter, endDateFilter]);
+
+    const previewRecord = currentUser?.userId
+        ? transactionExportService.mapOrdersToExportRecords(filteredOrders, currentUser.userId)[0]
+        : undefined;
 
     // Export handler
     const handleExport = (format: "csv" | "pdf") => {
@@ -99,7 +131,8 @@ export default function TransactionsPage() {
             dateRange: {
                 from: startDateFilter || undefined,
                 to: endDateFilter || undefined
-            }
+            },
+            fields: selectedExportFields
         });
     };
 
@@ -109,7 +142,7 @@ export default function TransactionsPage() {
             <div className="flex flex-col flex-1 min-w-0 pb-20 md:pb-0">
                 <Header description="history & exports" title="Transactions" />
 
-                <main className="flex-1 px-4 md:px-16 pb-12 pt-0 w-full flex flex-col lg:flex-row gap-8 items-start">
+                <main id="main-content" tabIndex={-1} className="flex-1 px-4 md:px-16 pb-12 pt-0 w-full flex flex-col lg:flex-row gap-8 items-start focus:outline-none">
                     
                     {/* FILTERS PANEL */}
                     <div className="w-full lg:w-[320px] flex flex-col gap-6 shrink-0 pt-4 lg:pt-12">
@@ -139,6 +172,14 @@ export default function TransactionsPage() {
                             </div>
 
                             <div className="h-[1px] bg-[rgba(69,73,50,0.2)]" />
+
+                            <label className="flex flex-col gap-3 text-[10px] text-[#64748B] font-bold tracking-[1px] uppercase">
+                                Asset
+                                <select value={assetFilter} onChange={e => { setAssetFilter(e.target.value); setPage(1); }} className="w-full bg-[#11212E] text-white rounded-lg p-3 text-sm">
+                                    <option value="ALL">All assets</option>
+                                    {availableAssets.map(asset => <option key={asset} value={asset}>{asset}</option>)}
+                                </select>
+                            </label>
 
                             {/* Status Filter */}
                             <div className="flex flex-col gap-3">
@@ -215,6 +256,15 @@ export default function TransactionsPage() {
                             <h2 className="text-[20px] font-black tracking-[-0.6px] uppercase text-white">
                                 History
                             </h2>
+                            <details className="text-xs text-gray-300">
+                                <summary className="cursor-pointer">Export preview · {filteredOrders.length} rows</summary>
+                                <fieldset className="absolute z-20 mt-2 grid max-h-64 grid-cols-2 gap-2 overflow-auto rounded-xl border border-[#263949] bg-[#0D1D2C] p-4 shadow-xl">
+                                    <legend className="col-span-2 text-xs font-bold">Choose fields to include</legend>
+                                    {exportFields.map(field => <label key={field.key} className="flex items-center gap-2"><input type="checkbox" checked={selectedExportFields.includes(field.key)} onChange={e => setSelectedExportFields(current => e.target.checked ? [...current, field.key] : current.filter(key => key !== field.key))} />{field.label}</label>)}
+                                    {previewRecord && <p className="col-span-2 max-w-72 truncate text-[10px] text-gray-400" title={`Preview: ${selectedExportFields.map(key => `${key}: ${previewRecord[key]}`).join(" · ")}`}>Preview first row: {selectedExportFields.map(key => previewRecord[key]).filter(Boolean).join(" · ")}</p>}
+                                    <p className="col-span-2 text-[10px] text-gray-400">Exports are generated locally in your browser and are not uploaded.</p>
+                                </fieldset>
+                            </details>
                             <TransactionExportMenu
                                 disabled={filteredOrders.length === 0}
                                 onExport={handleExport}
@@ -240,23 +290,32 @@ export default function TransactionsPage() {
                                         <Loader2 className="w-10 h-10 animate-spin text-[#55D6BE] mb-4" />
                                         <p className="font-bold">Loading transactions...</p>
                                     </div>
+                                ) : ordersError ? (
+                                    <div role="alert" className="flex flex-col items-center gap-3 p-20 text-center text-gray-400">
+                                        <p className="font-bold">Payment history is temporarily unavailable.</p>
+                                        <p className="text-sm">Check your connection and try again. No sample payments are shown.</p>
+                                        <p className="text-xs">Network: {process.env.NEXT_PUBLIC_STELLAR_NETWORK || "TESTNET"}</p>
+                                        <button type="button" onClick={() => refetch()} className="rounded-lg bg-[#55D6BE] px-4 py-2 font-bold text-black">Retry</button>
+                                    </div>
                                 ) : filteredOrders.length === 0 ? (
                                     <div className="flex flex-col items-center justify-center p-20 text-gray-500">
                                         <ShoppingCart className="w-12 h-12 mb-4 stroke-1" />
-                                        <p className="font-bold text-center">There are no transactions available to export.</p>
+                                        <p className="font-bold text-center">{orders.length === 0 ? "No payments yet" : "No transactions match these filters"}</p>
+                                        <p className="mt-2 max-w-md text-center text-sm">{orders.length === 0 ? "Your payment history will appear here after your first transaction. No demo transactions are added to your account." : "Change or clear the filters to see more transaction history."}</p>
+                                        <p className="mt-2 text-xs">Network: {process.env.NEXT_PUBLIC_STELLAR_NETWORK || "TESTNET"}</p>
                                     </div>
                                 ) : (
-                                    filteredOrders.map((o) => {
+                                    pageOrders.map((o) => {
                                         const isBuy = o.buyerId === currentUser?.userId;
                                         
                                         // Format Date display
                                         const dateStr = o.createdAt
-                                            ? new Date(o.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }).toUpperCase()
+                                            ? new Date(o.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).toUpperCase()
                                             : "N/A";
                                             
                                         // Asset amount format
                                         const assetAmountNum = parseFloat(o.assetAmount) || 0;
-                                        const formattedAsset = assetAmountNum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+                                        const formattedAsset = formatAssetAmount(o.assetAmount || "0");
                                         const assetCode = o.offer?.assetCode || o.assetCode || "USDC";
 
                                         // Fiat amount format
@@ -264,8 +323,8 @@ export default function TransactionsPage() {
                                         const totalFiat = parseFloat(o.fiatAmount) || (assetAmountNum * priceNum);
                                         const parseCurrency = (pref?: string) => pref ? pref.split(" ")[0] : null;
                                         const fiatCurrency = parseCurrency(o.buyer?.preferredCurrency) || parseCurrency(o.seller?.preferredCurrency) || "EUR";
-                                        const fiatSymbol = fiatCurrency === "EUR" ? "€" : fiatCurrency === "CRC" ? "₡" : "$";
-                                        const formattedFiat = totalFiat.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                                        const currencyCode = /^[A-Z]{3}$/i.test(fiatCurrency) ? fiatCurrency.toUpperCase() : "EUR";
+                                        const formattedFiat = formatFiatAmount(o.fiatAmount || String(totalFiat), currencyCode);
 
                                         const cleanStatus = o.orderStatus === "completed" || o.escrow?.escrowStatus === "released"
                                             ? "completed"
@@ -312,7 +371,7 @@ export default function TransactionsPage() {
 
                                                 {/* Fiat Amount */}
                                                 <div className="text-sm font-black text-white text-right pr-2">
-                                                    {fiatSymbol}{formattedFiat} <span className="text-[10px] text-[#64748B] font-bold">{fiatCurrency}</span>
+                                                    {formattedFiat} <span className="text-[10px] text-[#64748B] font-bold">{currencyCode}</span>
                                                 </div>
 
                                                 {/* Status */}
@@ -343,6 +402,15 @@ export default function TransactionsPage() {
                                     })
                                 )}
                             </div>
+                            {!loading && filteredOrders.length > 0 && (
+                                <nav aria-label="Transaction history pages" className="flex items-center justify-between border-t border-[#263949] p-4">
+                                    <span className="text-xs text-gray-400">Page {page} of {pageCount} · {filteredOrders.length} transactions</span>
+                                    <div className="flex gap-2">
+                                        <button type="button" disabled={page <= 1} onClick={() => setPage(p => Math.max(1, p - 1))} className="rounded border border-[#263949] px-3 py-2 text-sm disabled:opacity-40">Previous</button>
+                                        <button type="button" disabled={page >= pageCount} onClick={() => setPage(p => Math.min(pageCount, p + 1))} className="rounded border border-[#263949] px-3 py-2 text-sm disabled:opacity-40">Next</button>
+                                    </div>
+                                </nav>
+                            )}
                         </div>
                     </div>
                 </main>

@@ -3,6 +3,7 @@ import { renderHook, act } from "@testing-library/react";
 import { useSend } from "../useSend";
 
 const mockSignTransaction = vi.fn();
+const mockAssertCorrectNetwork = vi.fn();
 const mockUserContext = {
   accessToken: "mock-token-123",
   currentUser: { userId: "user-1", publicKey: "GSOURCE" },
@@ -15,6 +16,7 @@ vi.mock("@/features/user/presentation/context/UserContext", () => ({
 vi.mock("@/features/wallet", () => ({
   useWallet: () => ({
     signTransaction: mockSignTransaction,
+    assertCorrectNetwork: mockAssertCorrectNetwork,
   }),
 }));
 
@@ -24,6 +26,7 @@ describe("useSend hook", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSignTransaction.mockReset();
+    mockAssertCorrectNetwork.mockReset();
   });
 
   afterEach(() => {
@@ -100,6 +103,20 @@ describe("useSend hook", () => {
     expect(result.current.state.step).toBe("error");
     expect(result.current.state.errorMessage).toBe("Recipient not found");
     expect(result.current.state.recipient).toBeNull();
+  });
+
+  it("does not resolve or prepare a send while the wallet is on the wrong network", async () => {
+    mockAssertCorrectNetwork.mockRejectedValueOnce(new Error("Wrong Stellar network detected"));
+    globalThis.fetch = vi.fn();
+
+    const { result } = renderHook(() => useSend());
+    await act(async () => {
+      await result.current.resolveAndPrepare("alex.localsettle", "5.00");
+    });
+
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(result.current.state.step).toBe("error");
+    expect(result.current.state.errorMessage).toMatch(/Wrong Stellar network/);
   });
 
   it("handles prepare transaction API failure", async () => {
@@ -224,6 +241,61 @@ describe("useSend hook", () => {
     expect(mockSignTransaction).toHaveBeenCalledWith("AAAA_UNSIGNED_XDR", "TESTNET");
     expect(result.current.state.step).toBe("success");
     expect(result.current.state.txHash).toBe("0xabcdef1234567890abcdef1234567890");
+  });
+
+  it("ignores repeated confirmation while the wallet signature is pending", async () => {
+    const recipient = {
+      address: "GRECIPIENT1234567890123456789012345678901234567890123456",
+      alias: "alex.localsettle",
+      exists: true,
+      hasUsdcTrustline: true,
+    };
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes("/send/resolve")) return Promise.resolve({ ok: true, json: () => Promise.resolve(recipient) });
+      if (url.includes("/send/prepare")) return Promise.resolve({ ok: true, json: () => Promise.resolve({ xdr: "AAAA_UNSIGNED_XDR" }) });
+      if (url.includes("/send/submit")) return Promise.resolve({ ok: true, json: () => Promise.resolve({ hash: "accepted-hash" }) });
+      return Promise.reject(new Error(`Unexpected URL: ${url}`));
+    });
+    mockSignTransaction.mockResolvedValue("AAAA_SIGNED_XDR");
+
+    const { result } = renderHook(() => useSend());
+    await act(async () => result.current.resolveAndPrepare("alex.localsettle", "10.0000000", "USDC"));
+    await act(async () => {
+      await Promise.all([result.current.confirmSend(), result.current.confirmSend()]);
+    });
+
+    expect(mockSignTransaction).toHaveBeenCalledTimes(1);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+    expect(result.current.state.txHash).toBe("accepted-hash");
+  });
+
+  it("preserves seven-decimal amounts and the recipient trustline result", async () => {
+    const recipientWithoutTrustline = {
+      address: "GRECIPIENT1234567890123456789012345678901234567890123456",
+      alias: "alex.localsettle",
+      exists: true,
+      hasUsdcTrustline: false,
+    };
+    let preparedBody: { amount?: string } | undefined;
+    globalThis.fetch = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (url.includes("/send/resolve")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(recipientWithoutTrustline) });
+      }
+      if (url.includes("/send/prepare")) {
+        preparedBody = JSON.parse(String(init?.body)) as { amount?: string };
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ xdr: "AAAA_FIXTURE_UNSIGNED_XDR", fee: "0.00001" }) });
+      }
+      return Promise.reject(new Error(`Unexpected URL: ${url}`));
+    });
+
+    const { result } = renderHook(() => useSend());
+    await act(async () => {
+      await result.current.resolveAndPrepare(recipientWithoutTrustline.address, "0.0000001", "USDC");
+    });
+
+    expect(preparedBody?.amount).toBe("0.0000001");
+    expect(result.current.state.recipient?.hasUsdcTrustline).toBe(false);
+    expect(result.current.state.step).toBe("confirm");
   });
 
   it("handles user cancelling or declining signature", async () => {

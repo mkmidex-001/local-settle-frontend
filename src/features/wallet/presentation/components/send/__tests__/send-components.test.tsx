@@ -159,6 +159,8 @@ describe("Send Flow Presentation Components", () => {
           amount="25.00"
           assetName="USDC"
           fee="0.075"
+          networkFee="0.00001"
+          total="25.07501"
           onBack={onBack}
           onConfirm={onConfirm}
         />
@@ -166,7 +168,11 @@ describe("Send Flow Presentation Components", () => {
 
       expect(screen.getByText("alex.localsettle")).toBeTruthy();
       expect(screen.getByText(/25\.00.*USDC/)).toBeTruthy();
-      expect(screen.getByText(/0\.075.*USDC/)).toBeTruthy();
+      expect(screen.getByText("Platform Fee")).toBeTruthy();
+      expect(screen.getByText("0.075 USDC")).toBeTruthy();
+      expect(screen.getByText("Stellar Network Fee")).toBeTruthy();
+      expect(screen.getByText("0.00001 XLM")).toBeTruthy();
+      expect(screen.getByText("25.07501 USDC")).toBeTruthy();
 
       fireEvent.click(screen.getByRole("button", { name: /Back/i }));
       expect(onBack).toHaveBeenCalledTimes(1);
@@ -179,7 +185,7 @@ describe("Send Flow Presentation Components", () => {
       const recipient = {
         address: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
         alias: null,
-        exists: false,
+        exists: true,
         hasUsdcTrustline: false,
       };
 
@@ -195,7 +201,29 @@ describe("Send Flow Presentation Components", () => {
       );
 
       expect(screen.getByText(/Recipient account might not have established a USDC trustline/i)).toBeTruthy();
-      expect(screen.getByText(/No LocalSettle profile/i)).toBeTruthy();
+      expect(screen.queryByText(/not funded or active yet/i)).toBeNull();
+    });
+
+    it("blocks signing until an unfunded Stellar recipient is activated", () => {
+      render(
+        <SendConfirmView
+          recipient={{
+            address: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+            alias: null,
+            exists: false,
+            hasUsdcTrustline: false,
+          }}
+          amount="10.00"
+          assetName="USDC"
+          fee="0.03"
+          onBack={vi.fn()}
+          onConfirm={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByText(/not funded or active yet/i)).toBeTruthy();
+      const sendButton = screen.getByRole("button", { name: /Sign & Send/i }) as HTMLButtonElement;
+      expect(sendButton.disabled).toBe(true);
     });
   });
 
@@ -220,6 +248,14 @@ describe("Send Flow Presentation Components", () => {
       expect(screen.getByText("Transaction Declined")).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: /Try Again/i }));
       expect(onRetry).toHaveBeenCalledTimes(1);
+    });
+
+    it("offers a way to edit recipient and amount after a cancelled signature", () => {
+      const onEdit = vi.fn();
+      render(<SendStatusView step="cancelled" onRetry={vi.fn()} onEdit={onEdit} />);
+
+      fireEvent.click(screen.getByRole("button", { name: /edit details/i }));
+      expect(onEdit).toHaveBeenCalledTimes(1);
     });
 
     it("renders error state with error message and retry option", () => {

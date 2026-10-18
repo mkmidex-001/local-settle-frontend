@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useTransition, Suspense } from "react";
+import React, { useState, useEffect, useTransition, Suspense, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Aside } from "@/app/components/Aside";
 import { Header } from "@/app/components/Header";
@@ -39,8 +39,15 @@ function SendContent() {
   const searchParams = useSearchParams();
   const { isConnected, publicKey, connect, isLoading: isWalletLoading } = useWallet();
   const { balances, isLoading: isBalancesLoading } = useWalletBalance(publicKey);
-  const { state, resolveAndPrepare, confirmSend, reset, backToConfirm } = useSend();
+  const { state, resolveAndPrepare, confirmSend, reset, backToConfirm, clearRecipientError } = useSend();
   const { notify } = useNotifications();
+  const stepHeadingRef = useRef<HTMLHeadingElement>(null);
+  const previousStepRef = useRef(state.step);
+
+  useEffect(() => {
+    if (previousStepRef.current !== state.step) stepHeadingRef.current?.focus();
+    previousStepRef.current = state.step;
+  }, [state.step]);
 
   // Read URL query params
   const initialRecipient =
@@ -48,37 +55,30 @@ function SendContent() {
     searchParams.get("recipient") ||
     searchParams.get("to") ||
     "";
-  const initialAsset = searchParams.get("asset") || "";
   const initialAmount = searchParams.get("amount") || "";
 
-  const [selectedAssetCode, setSelectedAssetCode] = useState<string | null>(
-    initialAsset ? initialAsset.toUpperCase() : "USDC"
-  );
   const [recipientInput, setRecipientInput] = useState(initialRecipient);
   const [amount, setAmount] = useState(initialAmount);
   const [inputError, setInputError] = useState<string | null>(null);
   const [amountError, setAmountError] = useState<string | null>(null);
   const [, startTransition] = useTransition();
 
+  const configuredUsdcIssuer = process.env.NEXT_PUBLIC_USDC_ISSUER?.trim() || null;
+  const supportedUsdcBalance = balances.find(
+    (balance) => balance.asset_code === "USDC" && (!configuredUsdcIssuer || balance.asset_issuer === configuredUsdcIssuer),
+  );
+  const supportedBalances = supportedUsdcBalance ? [supportedUsdcBalance] : [];
+
   // Derive selected asset from balances and user selection
   const selectedAsset: AssetBalance = React.useMemo(() => {
-    if (balances.length > 0) {
-      if (selectedAssetCode) {
-        const match = balances.find(
-          (b) => getAssetName(b).toUpperCase() === selectedAssetCode.toUpperCase()
-        );
-        if (match) return match;
-      }
-      const usdc = balances.find((b) => b.asset_code === "USDC");
-      return usdc || balances[0];
-    }
+    if (supportedUsdcBalance) return supportedUsdcBalance;
     return {
       asset_type: "credit_alphanum4",
-      asset_code: selectedAssetCode || "USDC",
-      asset_issuer: null,
+      asset_code: "USDC",
+      asset_issuer: configuredUsdcIssuer,
       balance: "0.00",
     };
-  }, [balances, selectedAssetCode]);
+  }, [supportedUsdcBalance, configuredUsdcIssuer]);
 
   const assetName = getAssetName(selectedAsset);
   const isTransacting =
@@ -153,7 +153,7 @@ function SendContent() {
           mobileLabel="Send"
         />
 
-        <main className="flex-1 px-4 md:px-12 py-8 max-w-7xl w-full mx-auto">
+        <main id="main-content" tabIndex={-1} className="flex-1 px-4 md:px-12 py-8 max-w-7xl w-full mx-auto focus:outline-none">
           {!isConnected ? (
             /* Wallet Not Connected State */
             <div className="max-w-xl mx-auto mt-8 bg-[#0D1D2C] border border-[#263949] rounded-3xl p-8 text-center flex flex-col items-center gap-6 shadow-2xl">
@@ -220,7 +220,13 @@ function SendContent() {
                   {/* Card Header */}
                   <div className="flex items-center justify-between mb-6 pb-4 border-b border-[#263949]">
                     <div className="flex flex-col">
-                      <h2 className="text-xl md:text-2xl font-black uppercase tracking-tight text-white flex items-center gap-2">
+                      <h2
+                        ref={stepHeadingRef}
+                        tabIndex={-1}
+                        aria-live="polite"
+                        aria-atomic="true"
+                        className="text-xl md:text-2xl font-black uppercase tracking-tight text-white flex items-center gap-2 focus:outline-none"
+                      >
                         <Zap size={22} className="text-[#55D6BE]" />
                         {state.step === "form" && "New Transfer"}
                         {state.step === "confirm" && "Review Transaction"}
@@ -242,12 +248,12 @@ function SendContent() {
                     </div>
 
                     {state.step === "form" && (
-                      <span className="px-3 py-1 bg-[#55D6BE]/10 border border-[#55D6BE]/20 rounded-full text-[10px] font-extrabold uppercase text-[#55D6BE] tracking-wider">
+                      <span role="progressbar" aria-label="Transfer progress" aria-valuemin={1} aria-valuemax={2} aria-valuenow={1} className="px-3 py-1 bg-[#55D6BE]/10 border border-[#55D6BE]/20 rounded-full text-[10px] font-extrabold uppercase text-[#55D6BE] tracking-wider">
                         Step 1 of 2
                       </span>
                     )}
                     {state.step === "confirm" && (
-                      <span className="px-3 py-1 bg-[#55D6BE]/10 border border-[#55D6BE]/20 rounded-full text-[10px] font-extrabold uppercase text-[#55D6BE] tracking-wider">
+                      <span role="progressbar" aria-label="Transfer progress" aria-valuemin={1} aria-valuemax={2} aria-valuenow={2} className="px-3 py-1 bg-[#55D6BE]/10 border border-[#55D6BE]/20 rounded-full text-[10px] font-extrabold uppercase text-[#55D6BE] tracking-wider">
                         Step 2 of 2
                       </span>
                     )}
@@ -261,20 +267,25 @@ function SendContent() {
                         onChange={(val) => {
                           setRecipientInput(val);
                           setInputError(null);
+                          clearRecipientError();
                         }}
-                        error={inputError}
+                        error={inputError || state.recipientError}
+                        onError={setInputError}
                         disabled={isTransacting}
                       />
 
                       <SendAssetSelect
-                        balances={balances}
+                        balances={supportedBalances}
                         selectedAsset={selectedAsset}
-                        onSelectAsset={(asset) => {
-                          setSelectedAssetCode(getAssetName(asset));
+                        onSelectAsset={() => {
                           setAmountError(null);
                         }}
                         disabled={isTransacting}
                       />
+                      <p className="-mt-4 text-xs text-[#9BABB7]">
+                        Supported transfer: USDC on {(process.env.NEXT_PUBLIC_STELLAR_NETWORK ?? "testnet").toLowerCase()}.
+                        {" "}Issuer: {supportedUsdcBalance?.asset_issuer ?? configuredUsdcIssuer ?? "not present in this wallet"}.
+                      </p>
 
                       <SendAmountInput
                         amount={amount}
@@ -316,6 +327,7 @@ function SendContent() {
                       onRetry={
                         state.step === "cancelled" ? backToConfirm : reset
                       }
+                      onEdit={state.step === "cancelled" ? reset : undefined}
                       onClose={reset}
                     />
                   )}
@@ -327,6 +339,7 @@ function SendContent() {
                       amount={amount}
                       assetName={assetName}
                       fee={state.fee}
+                      network={state.network}
                       onBack={reset}
                       onConfirm={confirmSend}
                       isLoading={isTransacting}
