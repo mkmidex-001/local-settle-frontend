@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { walletCapabilityMatrix } from "../../config/wallet-capabilities";
 
 const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
 const PUBLIC_PASSPHRASE = "Public Global Stellar Network ; September 2015";
@@ -9,6 +10,7 @@ const kitMock = {
     getAddress: vi.fn(),
     fetchAddress: vi.fn(),
     signTransaction: vi.fn(),
+    signMessage: vi.fn(),
     getNetwork: vi.fn(),
     disconnect: vi.fn(),
     refreshSupportedWallets: vi.fn(),
@@ -19,8 +21,8 @@ vi.mock("@creit.tech/stellar-wallets-kit", () => ({
     Networks: { TESTNET: TESTNET_PASSPHRASE, PUBLIC: PUBLIC_PASSPHRASE },
 }));
 
-vi.mock("@creit.tech/stellar-wallets-kit/modules/freighter", () => ({ FreighterModule: class {} }));
-vi.mock("@creit.tech/stellar-wallets-kit/modules/lobstr", () => ({ LobstrModule: class {} }));
+vi.mock("@creit.tech/stellar-wallets-kit/modules/freighter", () => ({ FreighterModule: class { productId = "freighter-id"; signMessage() {} } }));
+vi.mock("@creit.tech/stellar-wallets-kit/modules/lobstr", () => ({ LobstrModule: class { productId = "lobstr-id"; } }));
 vi.mock("@creit.tech/stellar-wallets-kit/modules/albedo", () => ({ AlbedoModule: class {} }));
 vi.mock("@creit.tech/stellar-wallets-kit/modules/xbull", () => ({ xBullModule: class {} }));
 vi.mock("@creit.tech/stellar-wallets-kit/modules/rabet", () => ({ RabetModule: class {} }));
@@ -37,7 +39,26 @@ describe("stellarWalletKitService", () => {
         vi.resetModules();
         kitMock.getNetwork.mockResolvedValue({ network: "TESTNET", networkPassphrase: TESTNET_PASSPHRASE });
         kitMock.fetchAddress.mockResolvedValue({ address: "GADDRESS" });
+        kitMock.signTransaction.mockResolvedValue({ signedTxXdr: "SIGNED_XDR" });
+        kitMock.signMessage.mockResolvedValue({ signedMessage: "SIGNED_MESSAGE" });
     });
+
+    it.each(Object.keys(walletCapabilityMatrix))(
+        "routes connection, address, network and signing through the kit for %s",
+        async (walletId) => {
+            const service = await loadService();
+
+            await expect(service.connect(walletId)).resolves.toBe("GADDRESS");
+            await expect(service.signTransaction("XDR", "GADDRESS")).resolves.toBe("SIGNED_XDR");
+            await expect(service.signMessage("challenge", "GADDRESS")).resolves.toBe("SIGNED_MESSAGE");
+
+            expect(kitMock.setWallet).toHaveBeenCalledWith(walletId);
+            expect(kitMock.fetchAddress).toHaveBeenCalled();
+            expect(kitMock.getNetwork).toHaveBeenCalled();
+            expect(kitMock.signTransaction).toHaveBeenCalled();
+            expect(kitMock.signMessage).toHaveBeenCalled();
+        },
+    );
 
     it("initializes the kit with Networks.TESTNET exactly once, even across multiple connects", async () => {
         const service = await loadService();
@@ -119,6 +140,13 @@ describe("stellarWalletKitService", () => {
         const service = await loadService();
 
         await expect(service.refreshSupportedWallets()).resolves.toEqual(wallets);
+    });
+
+    it("detects which configured wallet modules implement SEP-43 message signing", async () => {
+        const service = await loadService();
+
+        expect(service.supportsMessageSigning("freighter-id")).toBe(true);
+        expect(service.supportsMessageSigning("lobstr-id")).toBe(false);
     });
 
     it("refreshSupportedWallets() falls back to an empty list on failure", async () => {

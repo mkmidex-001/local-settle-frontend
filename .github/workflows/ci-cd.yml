@@ -35,7 +35,11 @@ jobs:
 
       - run: pnpm run lint
 
+      - run: pnpm run api:contracts:check
+
       - run: pnpm run test
+
+      - run: pnpm run contract:check
 
   build:
     name: Build Docker image

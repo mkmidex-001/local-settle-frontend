@@ -11,6 +11,7 @@ const Chat = dynamic(() => import("../../components/Chat").then((mod) => mod.Cha
 import { useUser } from "@/features/user/presentation/context/UserContext";
 import type { Order } from "@/features/order/models/order";
 import { useOrders } from "@/features/order/hooks/useOrders";
+import { useOrderExpiry } from "@/features/order/hooks/useOrderExpiry";
 import { ApiError } from "@/lib/api";
 import { canCancelOrder } from "@/features/order/utils/canCancelOrder";
 import { createDemoOrder } from "@/features/order/mocks/demo-order";
@@ -70,6 +71,10 @@ export default function TradePage({ params }: PageProps) {
         }
     }, [orderId, getOrder, isDemoOrder, currentUser]);
 
+    const expiry = useOrderExpiry(order?.expiresAt, () => {
+        void fetchOrder();
+    });
+
     useEffect(() => {
         if (currentUser) {
             fetchOrder();
@@ -95,6 +100,13 @@ export default function TradePage({ params }: PageProps) {
             return;
         }
 
+        if (!canCancelOrder(order, currentUser?.userId ?? "")) {
+            setShowCancelModal(false);
+            notify("warning", "This order can no longer be cancelled because its status has changed.");
+            await fetchOrder();
+            return;
+        }
+
         setIsCancelling(true);
         try {
             await cancelOrder(order.orderId);
@@ -116,7 +128,7 @@ export default function TradePage({ params }: PageProps) {
         } finally {
             setIsCancelling(false);
         }
-    }, [order, isDemoOrder, cancelOrder, notify, fetchOrder]);
+    }, [order, isDemoOrder, currentUser, cancelOrder, notify, fetchOrder]);
 
     if (!currentUser) {
         return (
@@ -225,6 +237,11 @@ export default function TradePage({ params }: PageProps) {
             <Aside />
             <div className="flex flex-col flex-1 min-w-0 h-full overflow-hidden">
                 <Header description="trading floor" title="p2p marketplace" />
+                {isDemoOrder && (
+                    <div role="status" className="border-b border-amber-400/30 bg-amber-400/10 px-4 py-2 text-center text-sm font-semibold text-amber-100">
+                        Demo mode — simulated order only. No real Stellar or fiat transfer will occur.
+                    </div>
+                )}
                 <main className="flex flex-col md:flex-row items-start w-full h-[calc(100vh-96px)] overflow-hidden bg-[#081521] min-h-0 select-none">
                     
                     {/* COLUMNA IZQUIERDA: Panel de Transacción */}
@@ -258,6 +275,15 @@ export default function TradePage({ params }: PageProps) {
                                         Sync issue — will retry
                                     </span>
                                 )}
+                                {expiry.hasExpiry && (
+                                    <span
+                                        role="timer"
+                                        aria-label={`Order ${expiry.label.toLowerCase()}`}
+                                        className={`text-[11px] font-bold uppercase tracking-wider font-space ${expiry.isExpired ? "text-red-400" : "text-[#C2C7D0]"}`}
+                                    >
+                                        {expiry.isExpired ? "EXPIRED" : `${expiry.label} REMAINING`}
+                                    </span>
+                                )}
                             </div>
                             <div className="flex items-center gap-4">
                                 <h2 className="text-white font-black text-[20px] leading-7 uppercase tracking-normal font-space hidden md:block">
@@ -275,7 +301,7 @@ export default function TradePage({ params }: PageProps) {
                                         <div className="w-full md:w-[616.2px] h-full shrink-0">
                                             <TradeDetails 
                                                 role={role}
-                                                amount={amountVal}
+                                                amount={totalVal}
                                                 assetCode={order.offer?.assetCode || "USDC"}
                                                 unitPrice={priceVal}
                                                 total={totalVal}
@@ -296,11 +322,15 @@ export default function TradePage({ params }: PageProps) {
                                                 escrowStatus={escrowStatus}
                                                 buyerAddress={buyerAddress}
                                                 amount={amountVal}
+                                                currency={order.seller?.preferredCurrency || "USD"}
+                                                recipientName={accountOwner}
+                                                isBuyer={isBuyer}
                                                 evidenceUrl={order.escrow?.evidenceUrl}
                                                 onStatusChange={fetchOrder}
-                                                canCancel={canCancel}
+                                                canCancel={canCancel && !expiry.isExpired}
                                                 isCancelling={isCancelling}
                                                 onCancelOrder={() => setShowCancelModal(true)}
+                                                isExpired={expiry.isExpired}
                                             />
                                         </div>
                                     </div>
@@ -322,11 +352,11 @@ export default function TradePage({ params }: PageProps) {
                                                 </span>
                                             </div>
                                             <div className="flex flex-col items-end justify-center">
-                                                <span className="text-white font-black text-[28px] font-space leading-none tracking-wide">
-                                                    14:52
+                                                <span className="text-white font-black text-[18px] font-space leading-none tracking-wide">
+                                                    {expiry.hasExpiry ? expiry.label : "—"}
                                                 </span>
                                                 <span className="text-[#9CA3AF] text-[10px] font-bold uppercase tracking-[1px] font-space mt-1">
-                                                    REMAINING TIME
+                                                    {expiry.hasExpiry ? (expiry.isExpired ? "ORDER EXPIRED" : "REMAINING TIME") : "EXPIRY UNAVAILABLE"}
                                                 </span>
                                             </div>
                                         </div>
@@ -356,9 +386,10 @@ export default function TradePage({ params }: PageProps) {
                                             expiresAt={order.expiresAt as string | undefined}
                                             evidenceUrl={order.escrow?.evidenceUrl}
                                             onStatusChange={fetchOrder}
-                                            canCancel={canCancel}
+                                            canCancel={canCancel && !expiry.isExpired}
                                             isCancelling={isCancelling}
                                             onCancelOrder={() => setShowCancelModal(true)}
+                                            orderExpired={expiry.isExpired}
                                         />
                                     </div>
 
@@ -403,6 +434,7 @@ export default function TradePage({ params }: PageProps) {
                     onConfirm={handleCancelOrder}
                     onClose={() => setShowCancelModal(false)}
                     isCancelling={isCancelling}
+                    canCancel={canCancel}
                 />
             )}
         </div>

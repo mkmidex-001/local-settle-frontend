@@ -53,19 +53,70 @@ function MerchantBalance({ publicKey, assetCode }: { publicKey?: string; assetCo
     return <span>{parseFloat(asset.balance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>;
 }
 
+function CounterpartySummary({ user }: { user?: import("@/features/user/models/users").Users }) {
+    const [stats, setStats] = useState<{ totalOrders: number; completedOrders: number } | null>(null);
+
+    useEffect(() => {
+        if (!user?.userId) return;
+        const controller = new AbortController();
+        fetch(`${process.env.NEXT_PUBLIC_API_URL}/orders/user-stats/${encodeURIComponent(user.userId)}`, { signal: controller.signal })
+            .then(response => response.ok ? response.json() : null)
+            .then(data => {
+                if (data && Number.isFinite(data.completedOrders) && Number.isFinite(data.totalOrders)) {
+                    setStats({ totalOrders: data.totalOrders, completedOrders: data.completedOrders });
+                }
+            })
+            .catch(() => undefined);
+        return () => controller.abort();
+    }, [user?.userId]);
+
+    const createdAt = user?.createdAt ? Date.parse(user.createdAt) : Number.NaN;
+    const joinedLabel = Number.isFinite(createdAt)
+        ? `Joined ${new Intl.DateTimeFormat(undefined, { month: "short", year: "numeric" }).format(createdAt)}`
+        : null;
+
+    return (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[#9BABB7] text-xs mt-0.5">
+            <span>{stats ? `${stats.completedOrders} completed orders` : "Order history unavailable"}</span>
+            {joinedLabel && <span aria-label={joinedLabel}>· {joinedLabel}</span>}
+            {user?.kycStatus === "approved" && (
+                <span className="text-[#55D6BE]" aria-label="Identity verified">Verified</span>
+            )}
+        </div>
+    );
+}
+
 // ----------------------------------------------------------
 // Sort helper (client-side, does not mutate original array)
 // ----------------------------------------------------------
 function sortOffers(offers: Offer[], sort: string): Offer[] {
     const arr = [...offers];
+    const compareIds = (a: Offer, b: Offer) =>
+        a.offerId < b.offerId ? -1 : a.offerId > b.offerId ? 1 : 0;
+    const comparePrice = (direction: 1 | -1) => (a: Offer, b: Offer) => {
+        const aPrice = Number.parseFloat(a.price);
+        const bPrice = Number.parseFloat(b.price);
+        const aValid = Number.isFinite(aPrice);
+        const bValid = Number.isFinite(bPrice);
+        if (aValid !== bValid) return aValid ? -1 : 1;
+        if (aValid && aPrice !== bPrice) return (aPrice - bPrice) * direction;
+        return compareIds(a, b);
+    };
     switch (sort) {
         case "price_asc":
-            return arr.sort((a, b) => parseFloat(a.price) - parseFloat(b.price));
+            return arr.sort(comparePrice(1));
         case "price_desc":
-            return arr.sort((a, b) => parseFloat(b.price) - parseFloat(a.price));
+            return arr.sort(comparePrice(-1));
         case "newest":
-            // If offers had a createdAt, we'd sort by it; fall through to default for now
-            return arr;
+            return arr.sort((a, b) => {
+                const aDate = a.createdAt ? Date.parse(a.createdAt) : Number.NaN;
+                const bDate = b.createdAt ? Date.parse(b.createdAt) : Number.NaN;
+                const aValid = Number.isFinite(aDate);
+                const bValid = Number.isFinite(bDate);
+                if (aValid !== bValid) return aValid ? -1 : 1;
+                if (aValid && aDate !== bDate) return bDate - aDate;
+                return compareIds(a, b);
+            });
         case "completion_rate_desc":
         case "best_match":
         default:
@@ -368,7 +419,7 @@ function TradeDashboardInner() {
                                             </div>
                                             <div className="flex flex-col">
                                                 <span className="text-white font-bold text-base">{userFound[offer.creatorId]?.alias || "Unknown"}</span>
-                                                <span className="text-[#55D6BE] text-xs font-semibold mt-0.5 tracking-wide">1,420 ORDERS • 98.5%</span>
+                                                <CounterpartySummary user={userFound[offer.creatorId]} />
                                             </div>
                                         </div>
 
