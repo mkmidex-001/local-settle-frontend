@@ -15,15 +15,18 @@ export interface BalanceState {
   balance: string | null; // Native XLM balance
   balances: AssetBalance[]; // All balances
   isLoading: boolean;
+  isFetching: boolean;
+  lastUpdatedAt: number | null;
   error: string | null;
-  refetch: () => void;
+  refetch: () => Promise<void>;
+  hasData: boolean;
 }
 
 export function useWalletBalance(publicKey: string | null): BalanceState {
   const { apiFetch } = useApi();
   const { isCorrectNetwork, assertCorrectNetwork } = useWalletContext();
 
-  const { data, isLoading, error, refetch } = useQuery<AssetBalance[], Error>({
+  const { data, isLoading, isFetching, dataUpdatedAt, error, refetch: queryRefetch } = useQuery<AssetBalance[], Error>({
     queryKey: queryKeys.wallet.balance(publicKey),
     queryFn: async () => {
       await assertCorrectNetwork();
@@ -39,7 +42,10 @@ export function useWalletBalance(publicKey: string | null): BalanceState {
     balance: data && isCorrectNetwork ? balance : null,
     balances: isCorrectNetwork ? data || [] : [],
     isLoading,
+    isFetching,
+    lastUpdatedAt: dataUpdatedAt || null,
     error: error ? walletApiErrorMessage(error instanceof ApiError ? error.code : undefined, error.message) : null,
-    refetch,
+    hasData: data !== undefined,
+    refetch: async () => { await queryRefetch(); },
   };
 }

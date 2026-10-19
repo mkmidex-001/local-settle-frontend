@@ -21,6 +21,7 @@ interface UseOfferFiltersReturn {
     setFilter: <K extends keyof OfferFilters>(key: K, value: OfferFilters[K]) => void;
     setDraftFilter: <K extends keyof OfferFilters>(key: K, value: OfferFilters[K]) => void;
     applyDraftFilters: () => void;
+    applyPreset: (filters: OfferFilters) => void;
     resetDraftFilters: () => void;
     clearFilters: () => void;
     isFiltersDefault: boolean;
@@ -92,6 +93,15 @@ export function useOfferFilters(): UseOfferFiltersReturn {
         }
     }, [draftFilters, pushToURL]);
 
+    const applyPreset = useCallback((next: OfferFilters) => {
+        const errs = validateFilters(next);
+        setErrors(errs);
+        if (Object.keys(errs).length === 0) {
+            setDraftFilters(next);
+            pushToURL(next);
+        }
+    }, [pushToURL]);
+
     const resetDraftFilters = useCallback(() => {
         setDraftFilters(filters);
         setErrors({});
@@ -132,6 +142,7 @@ export function useOfferFilters(): UseOfferFiltersReturn {
         setFilter,
         setDraftFilter,
         applyDraftFilters,
+        applyPreset,
         resetDraftFilters,
         clearFilters,
         isFiltersDefault,

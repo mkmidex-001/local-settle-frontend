@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useEffect, useState } from "react";
 import type { RecipientInfo } from "./send-types";
 import { formatAssetAmount } from "@/lib/formatCurrency";
 import { AlertTriangle, ArrowLeft, Send } from "lucide-react";
@@ -10,6 +10,7 @@ interface SendConfirmViewProps {
   amount: string;
   assetName: string;
   fee: string | null;
+  memo?: string | null;
   networkFee?: string | null;
   total?: string | null;
   isStale?: boolean;
@@ -25,6 +26,7 @@ export function SendConfirmView({
   amount,
   assetName,
   fee,
+  memo,
   networkFee,
   total,
   isStale = false,
@@ -34,7 +36,18 @@ export function SendConfirmView({
   onConfirm,
   isLoading = false,
 }: SendConfirmViewProps) {
-  const feeDisplay = fee ? `${formatAssetAmount(fee)} ${assetName}` : "Not provided by server";
+  const [trustlineAcknowledged, setTrustlineAcknowledged] = useState(false);
+  const needsTrustlineAcknowledgement = assetName === "USDC" && !recipient.hasUsdcTrustline;
+
+  useEffect(() => {
+    setTrustlineAcknowledged(false);
+  }, [recipient.address, recipient.hasUsdcTrustline]);
+
+  const feeDisplay = fee === null
+    ? "Not provided by server"
+    : Number(fee) === 0
+      ? "0 (no platform fee)"
+      : `${formatAssetAmount(fee)} ${assetName}`;
   const networkFeeDisplay = networkFee ? `${formatAssetAmount(networkFee)} XLM` : "Not provided by server";
   const amountDisplay = formatAssetAmount(amount || "0");
   const totalDisplay = total ? `${formatAssetAmount(total)} ${assetName}` : "Not provided by server";
@@ -56,7 +69,7 @@ export function SendConfirmView({
                 {recipient.alias}
               </span>
             )}
-            <span className="text-[#C2C7D0] text-xs font-mono break-all">
+            <span data-testid="resolved-recipient-address" className="text-[#C2C7D0] text-xs font-mono break-all">
               <span className="break-all">{recipient.address}</span>
             </span>
             {!recipient.exists && (
@@ -72,11 +85,29 @@ export function SendConfirmView({
           <div className="mt-4 p-3 bg-amber-950/30 border border-amber-500/40 rounded-xl flex items-start gap-2.5">
             <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
             <p className="text-amber-300 text-xs leading-relaxed">
-              Recipient account might not have established a USDC trustline yet. The transfer could fail if not funded.
+              The recipient does not have a USDC trustline. They must establish one before this account can receive USDC; otherwise the transfer will fail.
             </p>
           </div>
         )}
+        {needsTrustlineAcknowledgement && (
+          <label className="mt-3 flex items-start gap-2 text-xs text-[#C2C7D0]">
+            <input
+              type="checkbox"
+              checked={trustlineAcknowledged}
+              onChange={(event) => setTrustlineAcknowledged(event.target.checked)}
+              className="mt-0.5 accent-[#55D6BE]"
+            />
+            I understand the recipient needs a USDC trustline before I sign this transfer.
+          </label>
+        )}
       </div>
+
+      {memo && (
+        <div className="bg-[#081521] border border-[#11212E] rounded-2xl p-5">
+          <p className="text-[#9BABB7] text-[11px] font-bold uppercase tracking-wider mb-2">Stellar text memo</p>
+          <p className="text-white text-sm break-all">{memo}</p>
+        </div>
+      )}
 
       {/* Transaction Details Card */}
       <div className="bg-[#081521] border border-[#11212E] rounded-2xl p-5">
@@ -112,6 +143,10 @@ export function SendConfirmView({
             </span>
           </div>
         </div>
+        <details id="fee-details" className="mt-4 text-xs text-[#9BABB7]">
+          <summary className="cursor-pointer text-[#55D6BE]">How transfer fees work</summary>
+          <p className="mt-2">The platform fee and amount above come from the server&apos;s prepare response. Stellar also applies a network fee when the signed transaction is submitted. That network fee is separate from the platform fee and is not included in this total.</p>
+        </details>
       </div>
 
       {isStale && (
@@ -133,7 +168,7 @@ export function SendConfirmView({
         <button
           type="button"
           onClick={isStale ? onRefresh : onConfirm}
-          disabled={isLoading || !recipient.exists}
+          disabled={isLoading || !recipient.exists || (!isStale && needsTrustlineAcknowledgement && !trustlineAcknowledged)}
           aria-describedby={!recipient.exists ? "inactive-recipient-help" : undefined}
           className="flex-1 flex items-center justify-center gap-2 bg-[#55D6BE] hover:bg-[#55D6BE] text-black text-xs font-black uppercase tracking-wider px-5 py-3.5 rounded-xl transition-all shadow-lg hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
         >

@@ -12,15 +12,16 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
 
   useEffect(() => {
     if (!isLoading && !canAccess) {
-      router.replace("/welcome");
+      const returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      router.replace(`/welcome?returnTo=${encodeURIComponent(returnTo)}`);
       return;
     }
   }, [canAccess, isLoading, router]);
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-[#081521]">
-        <div className="w-8 h-8 border-4 border-[#55D6BE] border-t-transparent rounded-full animate-spin" />
+      <div role="status" aria-label="Loading account" className="flex items-center justify-center min-h-screen bg-[#081521]">
+        <div className="w-8 h-8 border-4 border-[#55D6BE] border-t-transparent rounded-full animate-spin motion-reduce:animate-none" />
       </div>
     );
   }

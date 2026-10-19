@@ -16,6 +16,7 @@ import { useRouter } from "next/navigation";
 import { useUsers } from "../../../user/hooks/useUsers";
 import { useUser } from "../../../user/presentation/context/UserContext";
 import { useNotifications } from "@/features/notifications";
+import { getSafeReturnPath } from "../../utils/safeReturnPath";
 import { useQueryClient } from "@tanstack/react-query";
 
 const Context = createContext<WalletContext | null>(null);
@@ -245,6 +246,11 @@ export function WalletProvider({ children }: { children: ReactNode }) {
                 setAccessToken(token);
             }
 
+            // Keep a validated deep link through authentication and onboarding.
+            const returnTo = getSafeReturnPath(new URLSearchParams(window.location.search).get("returnTo"));
+            if (returnTo) sessionStorage.setItem("post-login-return", returnTo);
+            else sessionStorage.removeItem("post-login-return");
+
             // Onboarding logic
             const userAccount = await getOrCreateByWallet(publicKey);
             if (userAccount) {
@@ -252,10 +258,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
                 if (userAccount.pendingAccountInfo) {
                     router.push("/setupAccount");
                 } else {
-                    router.push("/dashboard");
+                    router.push(returnTo ?? "/dashboard");
+                    sessionStorage.removeItem("post-login-return");
                 }
             } else {
-                router.push("/dashboard");
+                router.push(returnTo ?? "/dashboard");
+                sessionStorage.removeItem("post-login-return");
             }
         } catch (err) {
             if (isWalletConnectionCancelled(err)) {

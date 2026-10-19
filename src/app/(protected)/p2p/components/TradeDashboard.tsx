@@ -5,6 +5,7 @@ import { Suspense } from "react";
 import dynamic from "next/dynamic";
 const CreateOfferModal = dynamic(() => import("./CreateOfferModal").then((mod) => mod.CreateOfferModal), { ssr: false });
 const ConfirmOrderModal = dynamic(() => import("./ConfirmOrderModal").then((mod) => mod.ConfirmOrderModal), { ssr: false });
+import { EditOfferDialog } from "./EditOfferDialog";
 import { useOffers } from "@/features/offer/hooks/useOffers";
 import { useOfferFilters } from "@/features/offer/hooks/useOfferFilters";
 import { useUsers } from "@/features/user/hooks/useUsers";
@@ -12,6 +13,7 @@ import { useUser } from "@/features/user/presentation/context/UserContext";
 import { KycBanner } from "@/app/components/KycBanner";
 import { useWalletBalance } from "@/features/wallet/presentation/hooks/useWalletBalance";
 import { Offer } from "@/features/offer/models/offer";
+import { formatOfferPrice } from "@/features/offer/utils/format-offer-price";
 import { OfferFilters } from "@/features/offer/components/OfferFilters";
 import { buildOfferQuery } from "@/features/offer/utils/build-offer-query";
 import { PaymentMethodOption } from "@/features/paymentMethod/models/paymentMethod";
@@ -214,6 +216,9 @@ function TradeDashboardInner() {
     const pageSize = 20;
     const [isOpen, setIsOpen] = useState(false);
     const [selectedOffer, setSelectedOffer] = useState<Offer | null>(null);
+    const [editingOffer, setEditingOffer] = useState<Offer | null>(null);
+    const [offerStatusOverrides, setOfferStatusOverrides] = useState<Record<string, string>>({});
+    const [ownerPausedOffers, setOwnerPausedOffers] = useState<Record<string, Offer>>({});
     const [compareIds, setCompareIds] = useState<string[]>([]);
 
     const handleTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
@@ -235,6 +240,7 @@ function TradeDashboardInner() {
         setFilter,
         setDraftFilter,
         applyDraftFilters,
+        applyPreset,
         resetDraftFilters,
         clearFilters,
         isFiltersDefault,
@@ -246,7 +252,8 @@ function TradeDashboardInner() {
         [tab, filters, page]
     );
 
-    const { offers, isLoading, isError, error, refetch, isFetching } = useOffers(apiFilters);
+    const { offers, isLoading, isError, error, refetch, isFetching, updateOffer } = useOffers(apiFilters);
+    const { currentUser } = useUser();
 
     useEffect(() => { setPage(0); }, [tab, filters]);
 
@@ -254,7 +261,16 @@ function TradeDashboardInner() {
     // paymentMethod, minAmount, maxAmount, and sort are applied here client-side
     // because the backend does not yet support those query params.
     const visibleOffers = useMemo(() => {
-        let result = offers;
+        const availableOffers = new Map(offers.map((offer) => [offer.offerId, offer]));
+        for (const pausedOffer of Object.values(ownerPausedOffers)) {
+            if (pausedOffer.creatorId === currentUser?.userId && !availableOffers.has(pausedOffer.offerId)) {
+                availableOffers.set(pausedOffer.offerId, pausedOffer);
+            }
+        }
+        let result = Array.from(availableOffers.values()).map((offer) => ({
+            ...offer,
+            status: offerStatusOverrides[offer.offerId] ?? offer.status,
+        })).filter((offer) => !offer.executed && (offer.status !== "paused" || offer.creatorId === currentUser?.userId));
 
         // --- paymentMethod filter ---
         if (filters.paymentMethod) {
@@ -295,7 +311,7 @@ function TradeDashboardInner() {
         }
 
         return sortOffers(result, filters.sort);
-    }, [offers, filters.paymentMethod, filters.minAmount, filters.maxAmount, filters.minPrice, filters.maxPrice, filters.sort]);
+    }, [offers, ownerPausedOffers, offerStatusOverrides, currentUser?.userId, filters.paymentMethod, filters.minAmount, filters.maxAmount, filters.minPrice, filters.maxPrice, filters.sort]);
 
     // Derive available payment methods and assets from current offer set
     const availablePaymentMethods = useMemo(() => {
@@ -319,7 +335,6 @@ function TradeDashboardInner() {
     }, [offers]);
 
     const { getUser, userFound } = useUsers();
-    const { currentUser } = useUser();
     const isVerified = currentUser?.kycStatus === "approved";
 
     useEffect(() => {
@@ -399,6 +414,7 @@ function TradeDashboardInner() {
                         onFilterChange={setFilter}
                         onDraftFilterChange={setDraftFilter}
                         onApplyDraft={applyDraftFilters}
+                        onApplyPreset={applyPreset}
                         onOpenDraft={resetDraftFilters}
                         onClearFilters={clearFilters}
                     />
@@ -434,9 +450,11 @@ function TradeDashboardInner() {
                             ];
 
                             return (
-                                <div
+                                <article
                                     key={offer.offerId}
-                                    className="flex min-w-0 w-full flex-col xl:flex-row bg-[#0D1D2C] border border-[#263949] rounded-2xl p-4 sm:p-6 hover:border-[#55D6BE] hover:bg-[#1A1A1C] transition-all duration-300 group gap-6 xl:gap-0"
+                                    aria-labelledby={`offer-title-${offer.offerId}`}
+                                    tabIndex={0}
+                                    className="flex min-w-0 w-full flex-col xl:flex-row bg-[#0D1D2C] border border-[#263949] rounded-2xl p-4 sm:p-6 hover:border-[#55D6BE] hover:bg-[#1A1A1C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#55D6BE] transition-all duration-300 group gap-6 xl:gap-0"
                                 >
                                     {/* Left: Identity and Capacity */}
                                     <div className="flex flex-col gap-6 xl:w-[40%]">
@@ -453,7 +471,7 @@ function TradeDashboardInner() {
                                                 <div className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-[#55D6BE] border-2 border-[#0D1D2C] rounded-full"></div>
                                             </div>
                                             <div className="flex flex-col">
-                                                <span className="text-white font-bold text-base">{userFound[offer.creatorId]?.alias || "Unknown"}</span>
+                                                <h3 id={`offer-title-${offer.offerId}`} className="text-white font-bold text-base">Offer from {userFound[offer.creatorId]?.alias || "Unknown"}</h3>
                                                 <CounterpartySummary user={userFound[offer.creatorId]} />
                                             </div>
                                         </div>
@@ -496,9 +514,8 @@ function TradeDashboardInner() {
                                             <span className="text-[#A1969C] text-[10px] font-bold tracking-widest uppercase">Unit Price</span>
                                             <div className="flex items-baseline gap-1.5">
                                                 <span className="text-[#55D6BE] font-bold text-[32px] tabular-nums tracking-tight leading-none">
-                                                    {parseFloat(offer.price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                    {formatOfferPrice(offer.price, offer.fiatCurrency ?? offer.currency)}
                                                 </span>
-                                                <span className="text-[#9BABB7] font-bold text-sm">USD</span>
                                             </div>
                                         </div>
 <button
@@ -512,7 +529,10 @@ function TradeDashboardInner() {
                                             {compareIds.includes(offer.offerId) ? "Remove from comparison" : "Compare offer"}
                                         </button>
                                         {currentUser?.userId === offer.creatorId && (
-                                            <span className="mb-2 rounded-full border border-[#55D6BE]/40 px-3 py-1 text-xs text-[#55D6BE]">Your offer</span>
+                                            <>
+                                                <span className="mb-2 rounded-full border border-[#55D6BE]/40 px-3 py-1 text-xs text-[#55D6BE]">Your offer</span>
+                                                <button type="button" onClick={() => setEditingOffer(offer)} className="rounded-lg border border-[#52616d] px-3 py-2 text-xs font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#55D6BE]">Edit</button>
+                                            </>
                                         )}
                                         {inactiveOfferReason(offer) ? (
                                             <p role="status" className="w-full max-w-[220px] rounded-lg border border-amber-500/30 bg-amber-950/20 p-3 text-xs text-amber-200">
@@ -527,15 +547,49 @@ function TradeDashboardInner() {
                                                 }
                                                 setSelectedOffer(offer);
                                             }}
-                                            className={`w-full max-w-[220px] py-3.5 rounded-xl font-bold text-sm tracking-wide transition-all duration-300 ${isVerified
+                                            aria-label={`${tab === "Buy" ? "Buy from" : "Sell to"} ${userFound[offer.creatorId]?.alias || "this trader"}`}
+                                            className={`w-full max-w-[220px] py-3.5 rounded-xl font-bold text-sm tracking-wide transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#55D6BE] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1D2C] ${isVerified
                                                 ? "bg-[#55D6BE] text-black hover:shadow-[0_0_20px_rgba(85,214,190,0.25)] hover:scale-[1.02] active:scale-[0.98]"
                                                 : "bg-gray-700 text-gray-400 cursor-not-allowed"
                                                 }`}
                                         >
                                             {tab === "Buy" ? "BUY" : "SELL"}
                                         </button>}
+                                        {currentUser?.userId === offer.creatorId && (
+                                            <button
+                                                type="button"
+                                                onClick={async () => {
+                                                    const nextStatus = offer.status === "paused" ? "active" : "paused";
+                                                    setOfferStatusOverrides((previous) => ({ ...previous, [offer.offerId]: nextStatus }));
+                                                    if (nextStatus === "paused") setOwnerPausedOffers((previous) => ({ ...previous, [offer.offerId]: { ...offer, status: "paused" } }));
+                                                    try {
+                                                        await updateOffer(offer.offerId, { status: nextStatus });
+                                                        if (nextStatus === "active") setOwnerPausedOffers((previous) => {
+                                                            const next = { ...previous };
+                                                            delete next[offer.offerId];
+                                                            return next;
+                                                        });
+                                                    } catch (error) {
+                                                        setOfferStatusOverrides((previous) => {
+                                                            const next = { ...previous };
+                                                            delete next[offer.offerId];
+                                                            return next;
+                                                        });
+                                                        if (offer.status !== "paused") setOwnerPausedOffers((previous) => {
+                                                            const next = { ...previous };
+                                                            delete next[offer.offerId];
+                                                            return next;
+                                                        });
+                                                        alert(error instanceof Error ? error.message : "Offer status could not be updated.");
+                                                    }
+                                                }}
+                                                className="w-full max-w-[220px] rounded-lg border border-[#55D6BE]/40 px-4 py-2 text-xs font-bold text-[#55D6BE] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#55D6BE]"
+                                            >
+                                                {offer.status === "paused" ? "Resume offer" : "Pause offer"}
+                                            </button>
+                                        )}
                                     </div>
-                                </div>
+                                </article>
                             );
                         })}
                     </div>
@@ -570,6 +624,7 @@ function TradeDashboardInner() {
                 <CreateOfferModal onClose={() => setIsOpen(false)} />
             )}
 
+            {editingOffer && <EditOfferDialog offer={editingOffer} onSave={(update) => updateOffer(editingOffer.offerId, update)} onClose={() => setEditingOffer(null)} />}
             {selectedOffer && userFound[selectedOffer.creatorId] && (
                 <ConfirmOrderModal
                     offer={selectedOffer}

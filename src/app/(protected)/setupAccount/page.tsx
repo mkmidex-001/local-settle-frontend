@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Header } from './components/Header'
 import { Line } from './components/Line'
@@ -11,6 +11,7 @@ import Stage3 from './pages/Stage3'
 import { useUsers } from '../../../features/user/hooks/useUsers'
 import { useUser } from '../../../features/user/presentation/context/UserContext'
 import { SetupAccountPayload } from '../../../features/user/models/setupAccount'
+import { getSafeReturnPath } from '@/features/wallet/utils/safeReturnPath'
 
 const ONBOARDING_PROGRESS_KEY = 'local-settle:onboarding-progress'
 
@@ -87,7 +88,9 @@ export default function SetupAccount() {
             if (updated) {
                 setCurrentUser(updated);
                 clearOnboardingProgress();
-                router.push('/dashboard');
+                const returnTo = getSafeReturnPath(sessionStorage.getItem('post-login-return'));
+                sessionStorage.removeItem('post-login-return');
+                router.push(returnTo ?? '/dashboard');
             }
             // On failure, `setupError` is now populated by useUsers and Stage3
             // keeps the entered values so the user can retry without re-typing.
@@ -102,7 +105,9 @@ export default function SetupAccount() {
             if (updated) {
                 setCurrentUser(updated);
                 clearOnboardingProgress();
-                router.push('/dashboard');
+                const returnTo = getSafeReturnPath(sessionStorage.getItem('post-login-return'));
+                sessionStorage.removeItem('post-login-return');
+                router.push(returnTo ?? '/dashboard');
             }
         }
     };

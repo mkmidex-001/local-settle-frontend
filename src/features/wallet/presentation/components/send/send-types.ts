@@ -9,6 +9,7 @@ export type SendStep =
   | "submitting"
   | "success"
   | "error"
+  | "uncertain"
   | "cancelled";
 
 export interface RecipientInfo {

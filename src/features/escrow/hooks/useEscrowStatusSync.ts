@@ -66,6 +66,7 @@ export function useEscrowStatusSync({
     const mountedRef = useRef(true);
     const onStatusChangeRef = useRef(onStatusChange);
     const currentStatusRef = useRef<EscrowStatus | null>(null);
+    const latestUpdatedAtRef = useRef(0);
 
     /* Keep refs in sync with latest props / state. */
     useEffect(() => {
@@ -82,6 +83,10 @@ export function useEscrowStatusSync({
     const processEvent = useCallback((event: EscrowStatusEvent) => {
         if (!mountedRef.current) return;
 
+        const eventTime = Date.parse(event.updatedAt);
+        if (currentStatusRef.current && isTerminalStatus(currentStatusRef.current) && !isTerminalStatus(event.status)) return;
+        if (Number.isFinite(eventTime) && latestUpdatedAtRef.current > eventTime) return;
+
         const key = deduplicationKey(event);
         if (seenKeysRef.current.has(key)) return;
         seenKeysRef.current.add(key);
@@ -91,7 +96,7 @@ export function useEscrowStatusSync({
         // status transition.
         const statusChanged = currentStatusRef.current !== event.status;
         currentStatusRef.current = event.status;
-
+        if (Number.isFinite(eventTime)) latestUpdatedAtRef.current = eventTime;
         setCurrentStatus(event.status);
         setSyncState((prev) => ({
             ...prev,
@@ -268,6 +273,11 @@ export function useEscrowStatusSync({
 
     useEffect(() => {
         if (!enabled || !escrowId) return;
+
+        currentStatusRef.current = null;
+        latestUpdatedAtRef.current = 0;
+        seenKeysRef.current.clear();
+        setCurrentStatus(null);
 
         const handleVisibility = () => {
             if (document.visibilityState === "visible") {

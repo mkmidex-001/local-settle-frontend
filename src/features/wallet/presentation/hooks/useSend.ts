@@ -1,20 +1,15 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { useUser } from "@/features/user/presentation/context/UserContext";
+import { useApi } from "@/lib/api";
 import { useWallet } from "@/features/wallet";
+import { isValidSendAmount } from "@/features/wallet/application/send-amount";
 import { trackSendStage } from "../utils/send-analytics";
-import { apiFailureMessage, messages, safeUserMessage } from "@/lib/messages";
+import { messages, safeUserMessage } from "@/lib/messages";
 import { walletApiErrorMessage } from "@/features/wallet/utils/wallet-api-errors";
 import { getSendErrorGuidance } from "@/features/wallet/application/send-error-guidance";
 import { getStellarNetworkConfig } from "../../config/stellar-network";
 import { mapWalletError } from "../../utils/wallet-errors";
-
-async function apiFailure(response: Response, fallback: string): Promise<{ message: string; code?: string }> {
-  const body = await response.json().catch(() => ({})) as { code?: string; error?: string };
-  const code = body.code || body.error;
-  return { code, message: code ? walletApiErrorMessage(code) : apiFailureMessage(response.status, fallback) };
-}
 
 export type SendStep =
   | "form"
@@ -24,6 +19,7 @@ export type SendStep =
   | "submitting"
   | "success"
   | "error"
+  | "uncertain"
   | "cancelled";
 
 export interface RecipientInfo {
@@ -36,6 +32,7 @@ export interface RecipientInfo {
 export interface SendState {
   step: SendStep;
   recipient: RecipientInfo | null;
+  memo: string | null;
   preparedAmount: string | null;
   fee: string | null;
   networkFee: string | null;
@@ -48,19 +45,21 @@ export interface SendState {
   recipientError?: string | null;
 }
 
+const UNCERTAIN_SUBMISSION_PREFIX = "Submission outcome unknown:";
+
 export function useSend() {
-  const { accessToken } = useUser();
+  const { apiFetch } = useApi();
   const { signTransaction, assertCorrectNetwork } = useWallet();
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3000";
   const network = getStellarNetworkConfig().network.toUpperCase();
   const preparedXdrRef = useRef<string | null>(null);
-  const preparationInputRef = useRef<{ query: string; amount: string; assetCode?: string } | null>(null);
+  const preparationInputRef = useRef<{ query: string; amount: string; assetCode?: string; memo?: string } | null>(null);
   const assetCodeRef = useRef("USDC");
   const confirmInFlightRef = useRef(false);
 
   const [state, setState] = useState<SendState>({
     step: "form",
     recipient: null,
+    memo: null,
     preparedAmount: null,
     fee: null,
     networkFee: null,
@@ -72,9 +71,18 @@ export function useSend() {
   });
 
   const resolveAndPrepare = useCallback(
-    async (query: string, amount: string, assetCode?: string) => {
+    async (query: string, amount: string, assetCode?: string, memo?: string) => {
+      if (!isValidSendAmount(amount)) {
+        setState(s => ({ ...s, step: "error", errorMessage: "Enter a positive amount with no more than 7 decimal places." }));
+        return;
+      }
+      const trimmedMemo = memo?.trim() ?? "";
+      if (new TextEncoder().encode(trimmedMemo).length > 28) {
+        setState(s => ({ ...s, step: "error", errorMessage: "Stellar text memos must be 28 UTF-8 bytes or fewer." }));
+        return;
+      }
       trackSendStage("resolve", "started");
-      preparationInputRef.current = { query, amount, assetCode };
+      preparationInputRef.current = { query, amount, assetCode, memo: trimmedMemo };
       assetCodeRef.current = assetCode && assetCode !== "native" ? assetCode : "XLM";
       setState(s => ({ ...s, step: "loading", errorMessage: null }));
       let resolvingRecipient = true;
@@ -82,42 +90,33 @@ export function useSend() {
 
       try {
         await assertCorrectNetwork();
-        const headers: Record<string, string> = { "Content-Type": "application/json" };
-        if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
-
-        const resolveRes = await fetch(
-          `${apiUrl}/send/resolve?recipient=${encodeURIComponent(query)}`,
-          { headers }
+        const recipient = await apiFetch<RecipientInfo>(
+          `/send/resolve?recipient=${encodeURIComponent(query)}`,
+          { defaultError: "Could not resolve recipient" },
         );
-        if (!resolveRes.ok) {
-          const failure = await apiFailure(resolveRes, messages.wallet.resolveFailed);
-          throw Object.assign(new Error(failure.message), { code: failure.code });
-        }
-        const recipient: RecipientInfo = await resolveRes.json();
         resolvingRecipient = false;
 
         // Recipient lookup can take long enough for the wallet network to
         // change. Recheck immediately before asking the backend to prepare XDR.
         await assertCorrectNetwork();
 
-        const prepareBody: { recipient: string; amount: string; asset?: string } = {
+        const prepareBody: { recipient: string; amount: string; asset?: string; memo?: string } = {
           recipient: recipient.address,
           amount,
         };
+        if (trimmedMemo) prepareBody.memo = trimmedMemo;
         if (assetCode && assetCode !== "native") {
           prepareBody.asset = assetCode;
         }
 
-        const prepareRes = await fetch(`${apiUrl}/send/prepare`, {
+        const prepared = await apiFetch<Record<string, string>>("/send/prepare", {
           method: "POST",
-          headers,
-          body: JSON.stringify(prepareBody),
+          body: prepareBody,
+          defaultError: "Failed to prepare transaction",
         });
-        if (!prepareRes.ok) {
-          const failure = await apiFailure(prepareRes, messages.wallet.prepareFailed);
-          throw Object.assign(new Error(failure.message), { code: failure.code });
+        if (trimmedMemo && prepared.memo !== trimmedMemo) {
+          throw new Error("The server did not confirm this memo in the prepared transaction. Memo transfers need backend support; signing was not started.");
         }
-        const prepared = await prepareRes.json() as Record<string, string>;
 
         const xdr = prepared.xdr ?? prepared.unsignedXdr ?? prepared.txXdr ?? prepared.transaction ?? prepared.envelope ?? null;
         if (!xdr) {
@@ -131,6 +130,7 @@ export function useSend() {
           ...s,
           step: "confirm",
           recipient,
+          memo: trimmedMemo || null,
           preparedAmount: prepared.amount ?? amount,
           fee: prepared.platformFee ?? prepared.fee ?? null,
           networkFee: prepared.networkFee ?? prepared.baseFee ?? null,
@@ -151,7 +151,7 @@ export function useSend() {
           : { ...s, step: "error", errorMessage: message });
       }
     },
-    [accessToken, apiUrl, assertCorrectNetwork]
+    [apiFetch, assertCorrectNetwork]
   );
 
   const confirmSend = useCallback(async () => {
@@ -197,34 +197,31 @@ export function useSend() {
     // before sending so retrying cannot submit the same payment twice.
     preparedXdrRef.current = null;
     try {
-      const submitHeaders: Record<string, string> = { "Content-Type": "application/json" };
-      if (accessToken) submitHeaders["Authorization"] = `Bearer ${accessToken}`;
-      const submitRes = await fetch(`${apiUrl}/send/submit`, {
+      const result = await apiFetch<{ hash?: string }>("/send/submit", {
         method: "POST",
-        headers: submitHeaders,
-        body: JSON.stringify({ signedXdr }),
+        body: { signedXdr },
+        defaultError: "Transaction submission failed",
       });
-      if (!submitRes.ok) {
-        const body = await submitRes.json().catch(() => ({})) as { message?: string; code?: string; error?: string };
-        const guidance = getSendErrorGuidance(`${body.code || body.error || ""} ${body.message || ""}`, assetCodeRef.current);
-        throw new Error(guidance);
-      }
-      const result: { hash?: string } = await submitRes.json();
       trackSendStage("submit", "success");
       setState(s => ({ ...s, step: "success", txHash: result.hash ?? null }));
     } catch (err) {
+      const outcomeMayBeUnknown = err instanceof TypeError ||
+        (err instanceof Error && err.message.startsWith(UNCERTAIN_SUBMISSION_PREFIX));
       trackSendStage("submit", "failure");
+      const code = (err as { code?: string })?.code;
       setState(s => ({
         ...s,
-        step: "error",
-        errorMessage: (err as { code?: string })?.code
-          ? walletApiErrorMessage((err as { code: string }).code)
-          : safeUserMessage(err, messages.wallet.submitFailed),
+        step: outcomeMayBeUnknown ? "uncertain" : "error",
+        errorMessage: outcomeMayBeUnknown
+          ? "The submission response was lost or timed out. The transaction may still have reached Stellar. Check your wallet activity before attempting another transfer."
+          : code
+            ? getSendErrorGuidance(walletApiErrorMessage(code), assetCodeRef.current)
+            : safeUserMessage(err, messages.wallet.submitFailed),
       }));
     } finally {
       confirmInFlightRef.current = false;
     }
-  }, [accessToken, apiUrl, signTransaction, network, state.preparedAt]);
+  }, [apiFetch, signTransaction, network, state.preparedAt]);
 
   const refreshPrepared = useCallback(() => {
     const input = preparationInputRef.current;
@@ -232,13 +229,13 @@ export function useSend() {
       setState(s => ({ ...s, needsRefresh: true, errorMessage: "Please return to the form and prepare the transfer again." }));
       return;
     }
-    void resolveAndPrepare(input.query, input.amount, input.assetCode);
+    void resolveAndPrepare(input.query, input.amount, input.assetCode, input.memo);
   }, [resolveAndPrepare]);
 
   const reset = useCallback(() => {
     preparedXdrRef.current = null;
     preparationInputRef.current = null;
-    setState({ step: "form", recipient: null, preparedAmount: null, fee: null, networkFee: null, total: null, preparedAt: null, needsRefresh: false, txHash: null, errorMessage: null, recipientError: null });
+    setState({ step: "form", recipient: null, memo: null, preparedAmount: null, fee: null, networkFee: null, total: null, preparedAt: null, needsRefresh: false, txHash: null, errorMessage: null, recipientError: null });
   }, []);
 
   const clearRecipientError = useCallback(() => setState(s => ({ ...s, recipientError: null })), []);

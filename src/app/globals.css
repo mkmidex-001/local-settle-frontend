@@ -8,6 +8,7 @@
   --accent: #55d6be;
   --accent-strong: #38b99f;
   --muted: #9babb7;
+  --disabled-foreground: #b8c5ce;
 }
 
 @theme inline {
@@ -23,6 +24,12 @@ body {
   font-family: var(--font-localsettle), Arial, Helvetica, sans-serif;
 }
 
+button:disabled,
+button:disabled * {
+  color: var(--disabled-foreground) !important;
+  opacity: 1 !important;
+}
+
 @keyframes toast-enter {
   from {
     opacity: 0;
@@ -36,6 +43,17 @@ body {
 
 .toast-enter {
   animation: toast-enter 0.2s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 :where(a[href], button, input, select, textarea, [role="button"], [role="tab"], [role="menuitem"], [tabindex]):focus-visible {

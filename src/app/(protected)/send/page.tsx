@@ -11,6 +11,7 @@ import {
   type AssetBalance,
 } from "@/features/wallet";
 import { useSend } from "@/features/wallet/presentation/hooks/useSend";
+import { isValidSendAmount, toStroops } from "@/features/wallet/application/send-amount";
 import { useNotifications } from "@/features/notifications";
 import {
   SendAssetSelect,
@@ -39,7 +40,7 @@ function SendContent() {
   const searchParams = useSearchParams();
   const { isConnected, publicKey, connect, isLoading: isWalletLoading } = useWallet();
   const { balances, isLoading: isBalancesLoading } = useWalletBalance(publicKey);
-  const { state, resolveAndPrepare, confirmSend, reset, backToConfirm, clearRecipientError } = useSend();
+  const { state, resolveAndPrepare, confirmSend, refreshPrepared, reset, backToConfirm, clearRecipientError } = useSend();
   const { notify } = useNotifications();
   const stepHeadingRef = useRef<HTMLHeadingElement>(null);
   const previousStepRef = useRef(state.step);
@@ -59,6 +60,9 @@ function SendContent() {
 
   const [recipientInput, setRecipientInput] = useState(initialRecipient);
   const [amount, setAmount] = useState(initialAmount);
+  const [memo, setMemo] = useState("");
+  const [memoError, setMemoError] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const [inputError, setInputError] = useState<string | null>(null);
   const [amountError, setAmountError] = useState<string | null>(null);
   const [, startTransition] = useTransition();
@@ -85,6 +89,13 @@ function SendContent() {
     state.step === "loading" ||
     state.step === "signing" ||
     state.step === "submitting";
+  const isPreparedStale = state.needsRefresh || !state.preparedAt || now - state.preparedAt >= 4 * 60 * 1000;
+
+  useEffect(() => {
+    if (state.step !== "confirm") return;
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [state.step]);
 
   // Notify on success / error
   useEffect(() => {
@@ -115,29 +126,37 @@ function SendContent() {
       return;
     }
 
-    const numAmount = parseFloat(amount || "0");
-    if (isNaN(numAmount) || numAmount <= 0) {
-      setAmountError("Please enter an amount greater than 0");
+    const amountStroops = toStroops(amount);
+    if (amountStroops === null || amountStroops <= 0n) {
+      setAmountError("Enter a positive amount with no more than 7 decimal places.");
       return;
     }
 
-    const availBalance = parseFloat(selectedAsset.balance) || 0;
-    if (numAmount > availBalance) {
+    const availableStroops = toStroops(selectedAsset.balance);
+    if (availableStroops !== null && amountStroops > availableStroops) {
       setAmountError(
         `Amount exceeds available balance (${getFormattedBalance(selectedAsset)} ${assetName})`
       );
       return;
     }
 
+    if (new TextEncoder().encode(memo.trim()).length > 28) {
+      setMemoError("Stellar text memos must be 28 UTF-8 bytes or fewer");
+      return;
+    }
+
     setInputError(null);
     setAmountError(null);
-    resolveAndPrepare(trimmed, amount, assetName);
+    setMemoError(null);
+    resolveAndPrepare(trimmed, amount, assetName, memo.trim());
   };
 
   const handleResetForm = () => {
     reset();
     setAmount("");
     setRecipientInput("");
+    setMemo("");
+    setMemoError(null);
     setInputError(null);
     setAmountError(null);
   };
@@ -236,6 +255,7 @@ function SendContent() {
                           state.step === "submitting") &&
                           "Processing"}
                         {state.step === "error" && "Error"}
+                        {state.step === "uncertain" && "Check Status"}
                         {state.step === "cancelled" && "Declined"}
                       </h2>
                       <p className="text-[#9BABB7] text-xs uppercase tracking-wider font-semibold mt-1">
@@ -244,6 +264,7 @@ function SendContent() {
                         {state.step === "success" && "Transfer finalized on ledger"}
                         {state.step === "cancelled" && "Signature aborted"}
                         {state.step === "error" && "Action needed"}
+                        {state.step === "uncertain" && "Submission status unknown"}
                       </p>
                     </div>
 
@@ -298,6 +319,22 @@ function SendContent() {
                         disabled={isTransacting}
                       />
 
+                      <label className="flex flex-col gap-2 text-sm text-[#C2C7D0]">
+                        Stellar text memo <span className="text-xs text-[#9BABB7]">Optional · up to 28 UTF-8 bytes</span>
+                        <input
+                          value={memo}
+                          onChange={(event) => {
+                            setMemo(event.target.value);
+                            setMemoError(null);
+                          }}
+                          disabled={isTransacting}
+                          aria-invalid={Boolean(memoError)}
+                          className="w-full rounded-xl border border-[#263949] bg-[#081521] px-4 py-3 text-white outline-none focus:border-[#55D6BE]"
+                          placeholder="Add a memo"
+                        />
+                        {memoError && <span className="text-xs text-red-400">{memoError}</span>}
+                      </label>
+
                       <div className="pt-4">
                         <button
                           type="button"
@@ -305,7 +342,7 @@ function SendContent() {
                           disabled={
                             !recipientInput.trim() ||
                             !amount ||
-                            parseFloat(amount) <= 0 ||
+                            !isValidSendAmount(amount) ||
                             isTransacting
                           }
                           className="w-full bg-[#55D6BE] hover:bg-[#55D6BE] text-black text-sm font-black uppercase tracking-wider px-6 py-4 rounded-2xl transition-all shadow-lg hover:scale-[1.01] active:scale-[0.99] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer flex items-center justify-center gap-2"
@@ -320,6 +357,7 @@ function SendContent() {
                   {/* Loading / Status Steps */}
                   {(isTransacting ||
                     state.step === "error" ||
+                    state.step === "uncertain" ||
                     state.step === "cancelled") && (
                     <SendStatusView
                       step={state.step}
@@ -336,10 +374,15 @@ function SendContent() {
                   {state.step === "confirm" && state.recipient && (
                     <SendConfirmView
                       recipient={state.recipient}
-                      amount={amount}
+                      amount={state.preparedAmount ?? amount}
                       assetName={assetName}
                       fee={state.fee}
+                      networkFee={state.networkFee}
+                      total={state.total}
+                      memo={state.memo}
                       network={state.network}
+                      isStale={isPreparedStale}
+                      onRefresh={refreshPrepared}
                       onBack={reset}
                       onConfirm={confirmSend}
                       isLoading={isTransacting}
