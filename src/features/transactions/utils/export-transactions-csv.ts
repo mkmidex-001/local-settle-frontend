@@ -17,20 +17,31 @@ export function exportTransactionsCsv(records: ExportTransactionRecord[], filena
         "Payment Method",
         "Status",
         "Transaction Hash",
-        "Counterparty Alias"
+        "Counterparty Alias",
+        "Your Address",
+        "Counterparty Address"
     ];
 
     const escapeCsvValue = (val: string | number | undefined | null): string => {
         if (val === null || val === undefined) return "";
-        const str = String(val);
-        // Escape quotes, commas, and newlines
-        if (str.includes(",") || str.includes('"') || str.includes("\n") || str.includes("\r")) {
-            return `"${str.replace(/"/g, '""')}"`;
+        let str = String(val);
+        // Prevent spreadsheet formula execution for untrusted text while leaving
+        // ordinary negative numeric values intact.
+        if (/^[\t\r ]*[=+@]/.test(str) || /^[\t\r ]*-(?=\D)/.test(str)) {
+            str = `'${str}`;
         }
-        return str;
+        // Quote every cell (RFC 4180) so commas, quotes, CR/LF, and Unicode
+        // remain unambiguous when rows are parsed by spreadsheet software.
+        return `"${str.replace(/"/g, '""')}"`;
     };
 
-    const csvRows = [headers.map(escapeCsvValue).join(",")];
+    const exportedAt = new Date().toISOString();
+    const network = process.env.NEXT_PUBLIC_STELLAR_NETWORK || "TESTNET";
+    const csvRows = [
+        `Network,${escapeCsvValue(network)}`,
+        `Exported At (UTC),${escapeCsvValue(exportedAt)}`,
+        headers.map(escapeCsvValue).join(",")
+    ];
     for (const record of records) {
         const row = [
             record.orderId,
@@ -44,7 +55,9 @@ export function exportTransactionsCsv(records: ExportTransactionRecord[], filena
             record.paymentMethod,
             record.status,
             record.transactionHash,
-            record.counterpartyAlias
+            record.counterpartyAlias,
+            record.sourceAddress,
+            record.counterpartyAddress
         ];
         csvRows.push(row.map(escapeCsvValue).join(","));
     }

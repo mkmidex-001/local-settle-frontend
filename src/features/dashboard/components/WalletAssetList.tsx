@@ -7,6 +7,7 @@ interface WalletAssetListProps {
     assets: WalletAssetViewModel[];
     isLoading?: boolean;
     error?: string | null;
+    isStale?: boolean;
     onRetry?: () => void;
     onViewAll?: () => void;
 }
@@ -17,6 +18,7 @@ export function WalletAssetList({
     assets,
     isLoading = false,
     error = null,
+    isStale = false,
     onRetry,
     onViewAll,
 }: WalletAssetListProps) {
@@ -45,11 +47,11 @@ export function WalletAssetList({
                         <li
                             key={index}
                             data-testid="asset-skeleton"
-                            className="flex-1 min-h-16 rounded-2xl bg-[#141416] border border-[#1F1F22] animate-pulse"
+                            className="flex-1 min-h-16 rounded-2xl bg-[#141416] border border-[#1F1F22] animate-pulse motion-reduce:animate-none"
                         />
                     ))}
                 </ul>
-            ) : error ? (
+            ) : error && !isStale ? (
                 <div className="flex flex-col items-start gap-2 p-4 rounded-2xl bg-[#141416] border border-[#2A1F1F]">
                     <p role="alert" className="text-red-400 text-sm">
                         {`Couldn't load your assets. ${error}`}
@@ -77,6 +79,11 @@ export function WalletAssetList({
                         />
                     ))}
                 </ul>
+            )}
+            {error && isStale && (
+                <p role="status" className="mt-3 text-amber-200 text-xs">
+                    Showing saved assets; the latest refresh failed. {onRetry && <button type="button" onClick={onRetry} className="underline">Retry</button>}
+                </p>
             )}
         </section>
     );

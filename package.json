@@ -9,7 +9,12 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "analyze": "ANALYZE=true next build"
+    "api:contracts:generate": "node scripts/generate-api-contracts.mjs",
+    "api:contracts:check": "node scripts/generate-api-contracts.mjs --check",
+    "contract:check": "node scripts/check-backend-contract.mjs",
+    "analyze": "ANALYZE=true next build",
+    "analyze:bundle": "next experimental-analyze --output",
+    "check:route-budgets": "node scripts/check-route-budgets.mjs"
   },
   "dependencies": {
     "@creit.tech/stellar-wallets-kit": "2.5.0",

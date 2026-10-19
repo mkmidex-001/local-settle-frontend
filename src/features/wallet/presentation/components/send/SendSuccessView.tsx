@@ -3,6 +3,7 @@
 import React, { useState } from "react";
 import { Check, Copy, ExternalLink, ArrowRight, RotateCcw } from "lucide-react";
 import { truncateAddress } from "./send-types";
+import { getStellarExplorerTxUrl } from "@/features/transactions/utils/get-stellar-explorer-tx-url";
 
 interface SendSuccessViewProps {
   amount: string;
@@ -36,9 +37,15 @@ export function SendSuccessView({
     }
   };
 
-  const network = (process.env.NEXT_PUBLIC_STELLAR_NETWORK ?? "testnet").toLowerCase();
-  const explorerUrl = txHash
-    ? `https://stellar.expert/explorer/${network}/tx/${txHash}`
+  const configuredNetwork = (process.env.NEXT_PUBLIC_STELLAR_NETWORK ?? "testnet").trim().toLowerCase();
+  const network = configuredNetwork === "mainnet" || configuredNetwork === "public"
+    ? "public"
+    : configuredNetwork === "testnet"
+      ? "testnet"
+      : null;
+  const networkLabel = network === "public" ? "Stellar Public Network" : network === "testnet" ? "Stellar Testnet" : "Unknown network";
+  const explorerUrl = txHash && network
+    ? getStellarExplorerTxUrl(txHash, network)
     : null;
 
   return (
@@ -61,6 +68,7 @@ export function SendSuccessView({
             {recipientAlias || truncateAddress(recipientAddress)}
           </span>
         </p>
+        <p className="text-[#9BABB7] text-xs" aria-label="Stellar network">Network: {networkLabel}</p>
       </div>
 
       {/* Transaction Details Box */}

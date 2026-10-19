@@ -11,11 +11,13 @@ import {
 } from "react";
 import { walletService } from "../../application/wallet.service";
 import type { WalletContext, WalletState } from "../../domain/wallet.types";
-import { mapWalletError } from "../../utils/wallet-errors";
+import { isWalletConnectionCancelled, mapWalletError } from "../../utils/wallet-errors";
 import { useRouter } from "next/navigation";
 import { useUsers } from "../../../user/hooks/useUsers";
 import { useUser } from "../../../user/presentation/context/UserContext";
 import { useNotifications } from "@/features/notifications";
+import { getSafeReturnPath } from "../../utils/safeReturnPath";
+import { useQueryClient } from "@tanstack/react-query";
 
 const Context = createContext<WalletContext | null>(null);
 
@@ -34,11 +36,12 @@ const initialState: WalletState = {
 };
 
 export function WalletProvider({ children }: { children: ReactNode }) {
+    const queryClient = useQueryClient();
     const [state, setState] = useState<WalletState>(initialState);
 
     const router = useRouter();
     const { getOrCreateByWallet } = useUsers();
-    const { setCurrentUser, setAccessToken, logout } = useUser();
+    const { currentUser, setCurrentUser, setAccessToken, logout } = useUser();
     const { notify } = useNotifications();
 
     // Use refs to avoid stale closures in useEffect without triggering re-runs
@@ -46,6 +49,14 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     const setCurrentUserRef = useRef(setCurrentUser);
     useEffect(() => { getOrCreateRef.current = getOrCreateByWallet; }, [getOrCreateByWallet]);
     useEffect(() => { setCurrentUserRef.current = setCurrentUser; }, [setCurrentUser]);
+
+    // A restored or switched wallet must still match the API-authenticated user.
+    useEffect(() => {
+        if (!state.isConnected || !state.publicKey || !currentUser?.publicKey) return;
+        if (state.publicKey.trim().toUpperCase() === currentUser.publicKey.trim().toUpperCase()) return;
+        setState(initialState);
+        logout();
+    }, [state.isConnected, state.publicKey, currentUser?.publicKey, logout]);
 
     const checkNetwork = useCallback(async () => {
         setState((s) => ({ ...s, isCheckingNetwork: true }));
@@ -75,7 +86,18 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         let cancelled = false;
         walletService.restoreSession().then(async (session) => {
             if (cancelled || !session?.publicKey) {
-                if (!cancelled) setState((s) => ({ ...s, isLoading: false }));
+                if (!cancelled) {
+                    const hasSavedSession = Boolean(
+                        localStorage.getItem("wallet:provider") && localStorage.getItem("wallet:publicKey"),
+                    );
+                    setState((s) => ({
+                        ...s,
+                        isLoading: false,
+                        error: hasSavedSession
+                            ? "Your saved wallet is temporarily unavailable. Reconnect it to restore your session."
+                            : null,
+                    }));
+                }
                 return;
             }
 
@@ -118,13 +140,58 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         window.addEventListener("focus", handleCheck);
         document.addEventListener("visibilitychange", handleCheck);
 
+        // Wallet extensions do not expose a shared network-change event, so
+        // poll while the tab is active. This also catches a switch made in
+        // the extension without requiring the user to refocus the app.
+        const interval = window.setInterval(() => {
+            if (document.visibilityState === "visible") handleCheck();
+        }, 2_000);
+
         return () => {
             window.removeEventListener("focus", handleCheck);
             document.removeEventListener("visibilitychange", handleCheck);
+            window.clearInterval(interval);
         };
     }, [state.isConnected, checkNetwork]);
 
+    // Wallet extensions can change accounts while the tab is in the background.
+    // Revalidate on return and discard the old authenticated session if the
+    // provider no longer exposes the account we authenticated.
+    useEffect(() => {
+        if (!state.isConnected || !state.publicKey) return;
+        let checking = false;
+        const verifyAccount = async () => {
+            if (checking) return;
+            checking = true;
+            try {
+                const session = await walletService.restoreSession();
+                if (!session || session.publicKey !== state.publicKey) {
+                    walletService.clearSession();
+                    setCurrentUser(null);
+                    setAccessToken(null);
+                    queryClient.clear();
+                    setState({ ...initialState, isLoading: false });
+                }
+            } finally {
+                checking = false;
+            }
+        };
+        window.addEventListener("focus", verifyAccount);
+        document.addEventListener("visibilitychange", verifyAccount);
+        return () => {
+            window.removeEventListener("focus", verifyAccount);
+            document.removeEventListener("visibilitychange", verifyAccount);
+        };
+    }, [state.isConnected, state.publicKey, setCurrentUser, setAccessToken, queryClient]);
+
     const connect = useCallback(async (walletId: string) => {
+        // A new provider connection must not reuse another wallet's API token,
+        // user profile, or cached account-scoped queries.
+        if (state.isConnected || state.publicKey || state.walletId !== walletId) {
+            setCurrentUser(null);
+            setAccessToken(null);
+            queryClient.clear();
+        }
         // Switching wallets mid-session: clear the previous wallet's state
         // before establishing the new connection so a stale address never
         // stays visible.
@@ -135,7 +202,17 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         }));
 
         try {
-            const publicKey = await walletService.connect(walletId);
+            let publicKey: string;
+            try {
+                publicKey = await walletService.connect(walletId);
+            } catch (err) {
+                const walletError = err as { code?: number; message?: string };
+                const cancelled = walletError?.code === -4 || /cancel|reject|declin/i.test(walletError?.message || "");
+                if (!cancelled && typeof window !== "undefined") {
+                    window.dispatchEvent(new CustomEvent("localsettle:connectivity", { detail: "wallet-unavailable" }));
+                }
+                throw err;
+            }
 
             // Check network immediately upon connection
             const detected = await walletService.detectNetwork();
@@ -169,6 +246,11 @@ export function WalletProvider({ children }: { children: ReactNode }) {
                 setAccessToken(token);
             }
 
+            // Keep a validated deep link through authentication and onboarding.
+            const returnTo = getSafeReturnPath(new URLSearchParams(window.location.search).get("returnTo"));
+            if (returnTo) sessionStorage.setItem("post-login-return", returnTo);
+            else sessionStorage.removeItem("post-login-return");
+
             // Onboarding logic
             const userAccount = await getOrCreateByWallet(publicKey);
             if (userAccount) {
@@ -176,19 +258,29 @@ export function WalletProvider({ children }: { children: ReactNode }) {
                 if (userAccount.pendingAccountInfo) {
                     router.push("/setupAccount");
                 } else {
-                    router.push("/dashboard");
+                    router.push(returnTo ?? "/dashboard");
+                    sessionStorage.removeItem("post-login-return");
                 }
             } else {
-                router.push("/dashboard");
+                router.push(returnTo ?? "/dashboard");
+                sessionStorage.removeItem("post-login-return");
             }
         } catch (err) {
+            if (isWalletConnectionCancelled(err)) {
+                walletService.clearSession();
+                setState({ ...initialState, isLoading: false, error: null });
+                return;
+            }
             const msg = mapWalletError(err);
             walletService.clearSession();
+            setCurrentUser(null);
+            setAccessToken(null);
+            queryClient.clear();
             setState({ ...initialState, isLoading: false, error: msg });
             notify("error", msg);
             throw err; // Re-throw to be caught by the UI component
         }
-    }, [getOrCreateByWallet, setCurrentUser, setAccessToken, router, notify]);
+    }, [getOrCreateByWallet, setCurrentUser, setAccessToken, router, notify, queryClient, state]);
 
     const disconnect = useCallback(() => {
         walletService.clearSession();
@@ -199,18 +291,22 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         });
     }, [logout]);
 
-    const signTransaction = useCallback(async (xdr: string) => {
-        const detected = await walletService.detectNetwork();
+    const assertCorrectNetwork = useCallback(async () => {
+        const detected = await checkNetwork();
         if (detected !== expectedNetwork) {
             const expCap = expectedNetwork === "testnet" ? "Testnet" : "Mainnet";
             const curCap = detected === "unknown" ? "unknown network" : detected;
             throw new Error(`Wrong Stellar network detected. LocalSettle is configured for ${expCap}, but your wallet is connected to ${curCap}. Switch your wallet to ${expCap} before continuing.`);
         }
+    }, [checkNetwork]);
+
+    const signTransaction = useCallback(async (xdr: string) => {
+        await assertCorrectNetwork();
         return await walletService.signTransaction(xdr);
-    }, []);
+    }, [assertCorrectNetwork]);
 
     return (
-        <Context.Provider value={{ ...state, connect, disconnect, signTransaction, checkNetwork }}>
+        <Context.Provider value={{ ...state, connect, disconnect, signTransaction, checkNetwork, assertCorrectNetwork }}>
             {children}
         </Context.Provider>
     );

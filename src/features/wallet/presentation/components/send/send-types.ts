@@ -1,4 +1,5 @@
 import type { AssetBalance } from "@/features/wallet";
+import { formatAssetAmount } from "@/lib/formatCurrency";
 
 export type SendStep =
   | "form"
@@ -8,6 +9,7 @@ export type SendStep =
   | "submitting"
   | "success"
   | "error"
+  | "uncertain"
   | "cancelled";
 
 export interface RecipientInfo {
@@ -41,9 +43,7 @@ export function getAssetName(asset: AssetBalance): string {
 }
 
 export function getFormattedBalance(asset: AssetBalance): string {
-  const num = parseFloat(asset.balance);
-  if (isNaN(num)) return "0.00";
-  return num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 7 });
+  return formatAssetAmount(asset.balance);
 }
 
 export function isStellarAddress(value: string): boolean {

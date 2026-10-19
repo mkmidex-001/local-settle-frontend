@@ -62,9 +62,11 @@ export function useEscrowStatusSync({
     const abortRef = useRef<AbortController | null>(null);
     const seenKeysRef = useRef<Set<string>>(new Set());
     const isPollingRef = useRef(false);
+    const refreshAfterReconnectRef = useRef(false);
     const mountedRef = useRef(true);
     const onStatusChangeRef = useRef(onStatusChange);
     const currentStatusRef = useRef<EscrowStatus | null>(null);
+    const latestUpdatedAtRef = useRef(0);
 
     /* Keep refs in sync with latest props / state. */
     useEffect(() => {
@@ -81,17 +83,27 @@ export function useEscrowStatusSync({
     const processEvent = useCallback((event: EscrowStatusEvent) => {
         if (!mountedRef.current) return;
 
+        const eventTime = Date.parse(event.updatedAt);
+        if (currentStatusRef.current && isTerminalStatus(currentStatusRef.current) && !isTerminalStatus(event.status)) return;
+        if (Number.isFinite(eventTime) && latestUpdatedAtRef.current > eventTime) return;
+
         const key = deduplicationKey(event);
         if (seenKeysRef.current.has(key)) return;
         seenKeysRef.current.add(key);
 
+        // Socket and polling can report the same transition with different
+        // timestamps/IDs. Keep the view fresh, but only notify on a real
+        // status transition.
+        const statusChanged = currentStatusRef.current !== event.status;
+        currentStatusRef.current = event.status;
+        if (Number.isFinite(eventTime)) latestUpdatedAtRef.current = eventTime;
         setCurrentStatus(event.status);
         setSyncState((prev) => ({
             ...prev,
             lastUpdated: event.updatedAt,
             status: "synchronized",
         }));
-        onStatusChangeRef.current(event);
+        if (statusChanged) onStatusChangeRef.current(event);
 
         // Stop syncing if terminal.
         if (isTerminalStatus(event.status)) {
@@ -109,10 +121,11 @@ export function useEscrowStatusSync({
             (currentStatusRef.current !== null &&
                 isTerminalStatus(currentStatusRef.current))
         ) {
-            return;
+            return currentStatusRef.current;
         }
 
         isPollingRef.current = true;
+        setSyncState((prev) => ({ ...prev, status: "syncing" }));
 
         // Cancel any previous in-flight request.
         abortRef.current?.abort();
@@ -130,11 +143,11 @@ export function useEscrowStatusSync({
                 { headers, signal: controller.signal },
             );
 
-            if (!mountedRef.current) return;
+            if (!mountedRef.current) return currentStatusRef.current;
 
             if (res.status === 401) {
                 logout();
-                return;
+                return currentStatusRef.current;
             }
 
             if (!res.ok) {
@@ -143,7 +156,7 @@ export function useEscrowStatusSync({
                     ...prev,
                     status: "error",
                 }));
-                return;
+                return currentStatusRef.current;
             }
 
             const data: EscrowStatusEvent = await res.json();
@@ -156,16 +169,22 @@ export function useEscrowStatusSync({
                     ? prev.status
                     : "polling",
             }));
+            return data.status;
         } catch (err: unknown) {
-            if (!mountedRef.current) return;
+            if (!mountedRef.current) return currentStatusRef.current;
             // AbortError means we intentionally cancelled — don't flag as error.
-            if (err instanceof DOMException && err.name === "AbortError") return;
+            if (err instanceof DOMException && err.name === "AbortError") return currentStatusRef.current;
             setSyncState((prev) => ({
                 ...prev,
                 status: "error",
             }));
+            return currentStatusRef.current;
         } finally {
             isPollingRef.current = false;
+            if (refreshAfterReconnectRef.current && mountedRef.current) {
+                refreshAfterReconnectRef.current = false;
+                void pollStatus();
+            }
         }
     }, [escrowId, accessToken, logout, processEvent]);
 
@@ -212,6 +231,10 @@ export function useEscrowStatusSync({
                 }
                 // If subscribe fails, the polling fallback will pick up.
             });
+            // A reconnect may have missed events while disconnected. Refresh
+            // from the authoritative status endpoint after each subscription.
+            if (isPollingRef.current) refreshAfterReconnectRef.current = true;
+            else pollStatus();
         });
 
         socket.on("escrow-status-updated", (event) => {
@@ -244,12 +267,17 @@ export function useEscrowStatusSync({
         });
 
         socket.connect();
-    }, [accessToken, orderId, escrowId, processEvent]);
+    }, [accessToken, orderId, escrowId, processEvent, pollStatus]);
 
     /* ── Visibility handling ────────────────────────────────────── */
 
     useEffect(() => {
         if (!enabled || !escrowId) return;
+
+        currentStatusRef.current = null;
+        latestUpdatedAtRef.current = 0;
+        seenKeysRef.current.clear();
+        setCurrentStatus(null);
 
         const handleVisibility = () => {
             if (document.visibilityState === "visible") {
@@ -322,8 +350,9 @@ export function useEscrowStatusSync({
 
     /* ── Manual refresh (e.g. after a user action) ──────────────── */
     const refresh = useCallback(() => {
+        if (isPollingRef.current) return Promise.resolve(null);
         seenKeysRef.current.clear();
-        pollStatus();
+        return pollStatus();
     }, [pollStatus]);
 
     return {

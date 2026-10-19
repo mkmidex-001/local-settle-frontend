@@ -52,7 +52,7 @@ function OrdersSkeleton() {
       {[0, 1, 2, 3].map((row) => (
         <div
           key={row}
-          className="grid grid-cols-1 md:grid-cols-[1.5fr_1.2fr_1fr_1.2fr_1fr_40px] gap-4 p-6 border-b border-[rgba(22,22,24,0.05)] items-center animate-pulse"
+          className="grid grid-cols-1 md:grid-cols-[1.5fr_1.2fr_1fr_1.2fr_1fr_40px] gap-4 p-6 border-b border-[rgba(22,22,24,0.05)] items-center animate-pulse motion-reduce:animate-none"
         >
           <div className="flex items-center gap-4">
             <div className="w-10 h-10 rounded-full bg-[#172B3A]" />
@@ -119,7 +119,7 @@ export default function OrdersPage() {
         <Header description="trading floor" title="p2p marketplace" />
         <OrderNavbar />
 
-        <main className="flex-1 px-4 md:px-16 pb-12 pt-0 w-full flex flex-col lg:flex-row gap-8 items-start">
+        <main id="main-content" tabIndex={-1} className="flex-1 px-4 md:px-16 pb-12 pt-0 w-full flex flex-col lg:flex-row gap-8 items-start focus:outline-none">
           
           {/* SECCIÓN FILTROS (Columna Izquierda) */}
           <div className="w-full lg:w-[378.88px] flex flex-col gap-6 shrink-0 pt-4 lg:pt-12">

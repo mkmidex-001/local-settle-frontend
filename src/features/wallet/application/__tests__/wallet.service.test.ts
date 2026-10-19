@@ -10,8 +10,12 @@ vi.mock("../stellar-wallet-kit.service", () => ({
         connect: vi.fn(),
         signTransaction: vi.fn(),
         signMessage: vi.fn(),
+        supportsMessageSigning: vi.fn().mockReturnValue(true),
         disconnect: vi.fn(),
     },
+}));
+vi.mock("../config/wallet-options", () => ({
+    walletOptions: [{ id: "freighter-id", name: "Freighter", enabled: true }],
 }));
 
 const mockedKit = vi.mocked(stellarWalletKitService);
@@ -60,6 +64,16 @@ describe("walletService", () => {
             await expect(walletService.restoreSession()).resolves.toBeNull();
         });
 
+        it("forgets an invalid saved provider without attempting restoration", async () => {
+            localStorage.setItem("wallet:provider", "removed-provider");
+            localStorage.setItem("wallet:publicKey", "GOLD_ADDRESS");
+
+            await expect(walletService.restoreSession()).resolves.toBeNull();
+
+            expect(mockedKit.setWallet).not.toHaveBeenCalled();
+            expect(localStorage.getItem("wallet:provider")).toBeNull();
+        });
+
         it("restores a session when the kit confirms the same address", async () => {
             localStorage.setItem("wallet:provider", "freighter-id");
             localStorage.setItem("wallet:publicKey", "GADDRESS");
@@ -105,6 +119,16 @@ describe("walletService", () => {
             expect(localStorage.getItem("wallet:publicKey")).toBeNull();
             expect(mockedKit.disconnect).toHaveBeenCalled();
         });
+    });
+
+    it("forgets the saved wallet selection", () => {
+        localStorage.setItem("wallet:provider", "freighter-id");
+        localStorage.setItem("wallet:publicKey", "GADDRESS");
+
+        walletService.forgetWalletSelection();
+
+        expect(localStorage.getItem("wallet:provider")).toBeNull();
+        expect(localStorage.getItem("wallet:publicKey")).toBeNull();
     });
 
     describe("authenticate", () => {
@@ -182,6 +206,16 @@ describe("walletService", () => {
             expect(authCalls()).toHaveLength(1);
         });
 
+        it("detects wallets without SEP-43 support before requesting a challenge", async () => {
+            mockedKit.supportsMessageSigning.mockReturnValueOnce(false);
+
+            await expect(walletService.authenticate("G123")).rejects.toThrow(/does not support SEP-43 message signing/i);
+
+            expect(mockedKit.supportsMessageSigning).toHaveBeenCalledWith("freighter-id");
+            expect(authCalls()).toHaveLength(0);
+            expect(mockedKit.signMessage).not.toHaveBeenCalled();
+        });
+
         it("prevents duplicate authentication requests while one is in flight", async () => {
             mockAuthFetch([
                 { ok: true, json: async () => ({ challenge: "abc123" }) },
@@ -194,6 +228,25 @@ describe("walletService", () => {
             expect(first).toBe("jwt-token");
             expect(second).toBe("jwt-token");
             expect(authCalls()).toHaveLength(2);
+        });
+
+        it("does not share an in-flight login between different wallet addresses", async () => {
+            mockAuthFetch([
+                { ok: true, json: async () => ({ challenge: "challenge-1" }) },
+                { ok: true, json: async () => ({ access_token: "token-1" }) },
+                { ok: true, json: async () => ({ challenge: "challenge-2" }) },
+                { ok: true, json: async () => ({ access_token: "token-2" }) },
+            ]);
+            mockedKit.signMessage.mockResolvedValueOnce("signature-1").mockResolvedValueOnce("signature-2");
+
+            const [first, second] = await Promise.all([
+                walletService.authenticate("G123"),
+                walletService.authenticate("G456"),
+            ]);
+
+            expect(first).toBe("token-1");
+            expect(second).toBe("token-2");
+            expect(authCalls()).toHaveLength(4);
         });
     });
 });
