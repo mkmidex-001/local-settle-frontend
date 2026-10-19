@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useTransition, Suspense } from "react";
+import React, { useState, useEffect, useTransition, Suspense, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Aside } from "@/app/components/Aside";
 import { Header } from "@/app/components/Header";
@@ -11,6 +11,7 @@ import {
   type AssetBalance,
 } from "@/features/wallet";
 import { useSend } from "@/features/wallet/presentation/hooks/useSend";
+import { isValidSendAmount, toStroops } from "@/features/wallet/application/send-amount";
 import { useNotifications } from "@/features/notifications";
 import {
   SendAssetSelect,
@@ -39,8 +40,15 @@ function SendContent() {
   const searchParams = useSearchParams();
   const { isConnected, publicKey, connect, isLoading: isWalletLoading } = useWallet();
   const { balances, isLoading: isBalancesLoading } = useWalletBalance(publicKey);
-  const { state, resolveAndPrepare, confirmSend, reset, backToConfirm } = useSend();
+  const { state, resolveAndPrepare, confirmSend, refreshPrepared, reset, backToConfirm, clearRecipientError } = useSend();
   const { notify } = useNotifications();
+  const stepHeadingRef = useRef<HTMLHeadingElement>(null);
+  const previousStepRef = useRef(state.step);
+
+  useEffect(() => {
+    if (previousStepRef.current !== state.step) stepHeadingRef.current?.focus();
+    previousStepRef.current = state.step;
+  }, [state.step]);
 
   // Read URL query params
   const initialRecipient =
@@ -48,43 +56,46 @@ function SendContent() {
     searchParams.get("recipient") ||
     searchParams.get("to") ||
     "";
-  const initialAsset = searchParams.get("asset") || "";
   const initialAmount = searchParams.get("amount") || "";
 
-  const [selectedAssetCode, setSelectedAssetCode] = useState<string | null>(
-    initialAsset ? initialAsset.toUpperCase() : "USDC"
-  );
   const [recipientInput, setRecipientInput] = useState(initialRecipient);
   const [amount, setAmount] = useState(initialAmount);
+  const [memo, setMemo] = useState("");
+  const [memoError, setMemoError] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const [inputError, setInputError] = useState<string | null>(null);
   const [amountError, setAmountError] = useState<string | null>(null);
   const [, startTransition] = useTransition();
 
+  const configuredUsdcIssuer = process.env.NEXT_PUBLIC_USDC_ISSUER?.trim() || null;
+  const supportedUsdcBalance = balances.find(
+    (balance) => balance.asset_code === "USDC" && (!configuredUsdcIssuer || balance.asset_issuer === configuredUsdcIssuer),
+  );
+  const supportedBalances = supportedUsdcBalance ? [supportedUsdcBalance] : [];
+
   // Derive selected asset from balances and user selection
   const selectedAsset: AssetBalance = React.useMemo(() => {
-    if (balances.length > 0) {
-      if (selectedAssetCode) {
-        const match = balances.find(
-          (b) => getAssetName(b).toUpperCase() === selectedAssetCode.toUpperCase()
-        );
-        if (match) return match;
-      }
-      const usdc = balances.find((b) => b.asset_code === "USDC");
-      return usdc || balances[0];
-    }
+    if (supportedUsdcBalance) return supportedUsdcBalance;
     return {
       asset_type: "credit_alphanum4",
-      asset_code: selectedAssetCode || "USDC",
-      asset_issuer: null,
+      asset_code: "USDC",
+      asset_issuer: configuredUsdcIssuer,
       balance: "0.00",
     };
-  }, [balances, selectedAssetCode]);
+  }, [supportedUsdcBalance, configuredUsdcIssuer]);
 
   const assetName = getAssetName(selectedAsset);
   const isTransacting =
     state.step === "loading" ||
     state.step === "signing" ||
     state.step === "submitting";
+  const isPreparedStale = state.needsRefresh || !state.preparedAt || now - state.preparedAt >= 4 * 60 * 1000;
+
+  useEffect(() => {
+    if (state.step !== "confirm") return;
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [state.step]);
 
   // Notify on success / error
   useEffect(() => {
@@ -115,29 +126,37 @@ function SendContent() {
       return;
     }
 
-    const numAmount = parseFloat(amount || "0");
-    if (isNaN(numAmount) || numAmount <= 0) {
-      setAmountError("Please enter an amount greater than 0");
+    const amountStroops = toStroops(amount);
+    if (amountStroops === null || amountStroops <= 0n) {
+      setAmountError("Enter a positive amount with no more than 7 decimal places.");
       return;
     }
 
-    const availBalance = parseFloat(selectedAsset.balance) || 0;
-    if (numAmount > availBalance) {
+    const availableStroops = toStroops(selectedAsset.balance);
+    if (availableStroops !== null && amountStroops > availableStroops) {
       setAmountError(
         `Amount exceeds available balance (${getFormattedBalance(selectedAsset)} ${assetName})`
       );
       return;
     }
 
+    if (new TextEncoder().encode(memo.trim()).length > 28) {
+      setMemoError("Stellar text memos must be 28 UTF-8 bytes or fewer");
+      return;
+    }
+
     setInputError(null);
     setAmountError(null);
-    resolveAndPrepare(trimmed, amount, assetName);
+    setMemoError(null);
+    resolveAndPrepare(trimmed, amount, assetName, memo.trim());
   };
 
   const handleResetForm = () => {
     reset();
     setAmount("");
     setRecipientInput("");
+    setMemo("");
+    setMemoError(null);
     setInputError(null);
     setAmountError(null);
   };
@@ -153,7 +172,7 @@ function SendContent() {
           mobileLabel="Send"
         />
 
-        <main className="flex-1 px-4 md:px-12 py-8 max-w-7xl w-full mx-auto">
+        <main id="main-content" tabIndex={-1} className="flex-1 px-4 md:px-12 py-8 max-w-7xl w-full mx-auto focus:outline-none">
           {!isConnected ? (
             /* Wallet Not Connected State */
             <div className="max-w-xl mx-auto mt-8 bg-[#0D1D2C] border border-[#263949] rounded-3xl p-8 text-center flex flex-col items-center gap-6 shadow-2xl">
@@ -220,7 +239,13 @@ function SendContent() {
                   {/* Card Header */}
                   <div className="flex items-center justify-between mb-6 pb-4 border-b border-[#263949]">
                     <div className="flex flex-col">
-                      <h2 className="text-xl md:text-2xl font-black uppercase tracking-tight text-white flex items-center gap-2">
+                      <h2
+                        ref={stepHeadingRef}
+                        tabIndex={-1}
+                        aria-live="polite"
+                        aria-atomic="true"
+                        className="text-xl md:text-2xl font-black uppercase tracking-tight text-white flex items-center gap-2 focus:outline-none"
+                      >
                         <Zap size={22} className="text-[#55D6BE]" />
                         {state.step === "form" && "New Transfer"}
                         {state.step === "confirm" && "Review Transaction"}
@@ -230,6 +255,7 @@ function SendContent() {
                           state.step === "submitting") &&
                           "Processing"}
                         {state.step === "error" && "Error"}
+                        {state.step === "uncertain" && "Check Status"}
                         {state.step === "cancelled" && "Declined"}
                       </h2>
                       <p className="text-[#9BABB7] text-xs uppercase tracking-wider font-semibold mt-1">
@@ -238,16 +264,17 @@ function SendContent() {
                         {state.step === "success" && "Transfer finalized on ledger"}
                         {state.step === "cancelled" && "Signature aborted"}
                         {state.step === "error" && "Action needed"}
+                        {state.step === "uncertain" && "Submission status unknown"}
                       </p>
                     </div>
 
                     {state.step === "form" && (
-                      <span className="px-3 py-1 bg-[#55D6BE]/10 border border-[#55D6BE]/20 rounded-full text-[10px] font-extrabold uppercase text-[#55D6BE] tracking-wider">
+                      <span role="progressbar" aria-label="Transfer progress" aria-valuemin={1} aria-valuemax={2} aria-valuenow={1} className="px-3 py-1 bg-[#55D6BE]/10 border border-[#55D6BE]/20 rounded-full text-[10px] font-extrabold uppercase text-[#55D6BE] tracking-wider">
                         Step 1 of 2
                       </span>
                     )}
                     {state.step === "confirm" && (
-                      <span className="px-3 py-1 bg-[#55D6BE]/10 border border-[#55D6BE]/20 rounded-full text-[10px] font-extrabold uppercase text-[#55D6BE] tracking-wider">
+                      <span role="progressbar" aria-label="Transfer progress" aria-valuemin={1} aria-valuemax={2} aria-valuenow={2} className="px-3 py-1 bg-[#55D6BE]/10 border border-[#55D6BE]/20 rounded-full text-[10px] font-extrabold uppercase text-[#55D6BE] tracking-wider">
                         Step 2 of 2
                       </span>
                     )}
@@ -261,20 +288,25 @@ function SendContent() {
                         onChange={(val) => {
                           setRecipientInput(val);
                           setInputError(null);
+                          clearRecipientError();
                         }}
-                        error={inputError}
+                        error={inputError || state.recipientError}
+                        onError={setInputError}
                         disabled={isTransacting}
                       />
 
                       <SendAssetSelect
-                        balances={balances}
+                        balances={supportedBalances}
                         selectedAsset={selectedAsset}
-                        onSelectAsset={(asset) => {
-                          setSelectedAssetCode(getAssetName(asset));
+                        onSelectAsset={() => {
                           setAmountError(null);
                         }}
                         disabled={isTransacting}
                       />
+                      <p className="-mt-4 text-xs text-[#9BABB7]">
+                        Supported transfer: USDC on {(process.env.NEXT_PUBLIC_STELLAR_NETWORK ?? "testnet").toLowerCase()}.
+                        {" "}Issuer: {supportedUsdcBalance?.asset_issuer ?? configuredUsdcIssuer ?? "not present in this wallet"}.
+                      </p>
 
                       <SendAmountInput
                         amount={amount}
@@ -287,6 +319,22 @@ function SendContent() {
                         disabled={isTransacting}
                       />
 
+                      <label className="flex flex-col gap-2 text-sm text-[#C2C7D0]">
+                        Stellar text memo <span className="text-xs text-[#9BABB7]">Optional · up to 28 UTF-8 bytes</span>
+                        <input
+                          value={memo}
+                          onChange={(event) => {
+                            setMemo(event.target.value);
+                            setMemoError(null);
+                          }}
+                          disabled={isTransacting}
+                          aria-invalid={Boolean(memoError)}
+                          className="w-full rounded-xl border border-[#263949] bg-[#081521] px-4 py-3 text-white outline-none focus:border-[#55D6BE]"
+                          placeholder="Add a memo"
+                        />
+                        {memoError && <span className="text-xs text-red-400">{memoError}</span>}
+                      </label>
+
                       <div className="pt-4">
                         <button
                           type="button"
@@ -294,7 +342,7 @@ function SendContent() {
                           disabled={
                             !recipientInput.trim() ||
                             !amount ||
-                            parseFloat(amount) <= 0 ||
+                            !isValidSendAmount(amount) ||
                             isTransacting
                           }
                           className="w-full bg-[#55D6BE] hover:bg-[#55D6BE] text-black text-sm font-black uppercase tracking-wider px-6 py-4 rounded-2xl transition-all shadow-lg hover:scale-[1.01] active:scale-[0.99] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer flex items-center justify-center gap-2"
@@ -309,6 +357,7 @@ function SendContent() {
                   {/* Loading / Status Steps */}
                   {(isTransacting ||
                     state.step === "error" ||
+                    state.step === "uncertain" ||
                     state.step === "cancelled") && (
                     <SendStatusView
                       step={state.step}
@@ -316,6 +365,7 @@ function SendContent() {
                       onRetry={
                         state.step === "cancelled" ? backToConfirm : reset
                       }
+                      onEdit={state.step === "cancelled" ? reset : undefined}
                       onClose={reset}
                     />
                   )}
@@ -324,9 +374,15 @@ function SendContent() {
                   {state.step === "confirm" && state.recipient && (
                     <SendConfirmView
                       recipient={state.recipient}
-                      amount={amount}
+                      amount={state.preparedAmount ?? amount}
                       assetName={assetName}
                       fee={state.fee}
+                      networkFee={state.networkFee}
+                      total={state.total}
+                      memo={state.memo}
+                      network={state.network}
+                      isStale={isPreparedStale}
+                      onRefresh={refreshPrepared}
                       onBack={reset}
                       onConfirm={confirmSend}
                       isLoading={isTransacting}

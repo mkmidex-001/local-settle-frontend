@@ -24,6 +24,7 @@ interface SendStatusViewProps {
   errorMessage?: string | null;
   onRetry: () => void;
   onClose?: () => void;
+  onEdit?: () => void;
 }
 
 export function SendStatusView({
@@ -31,6 +32,7 @@ export function SendStatusView({
   errorMessage,
   onRetry,
   onClose,
+  onEdit,
 }: SendStatusViewProps) {
   const isTransacting = step === "loading" || step === "signing" || step === "submitting";
 
@@ -74,6 +76,15 @@ export function SendStatusView({
         </div>
 
         <div className="flex gap-3 w-full max-w-xs mt-2">
+          {onEdit && (
+            <button
+              type="button"
+              onClick={onEdit}
+              className="flex-1 flex items-center justify-center gap-1.5 bg-[#11212E] hover:bg-[#172B3A] text-white text-xs font-bold uppercase px-4 py-3 rounded-xl transition-all border border-[#172B3A] cursor-pointer"
+            >
+              Edit details
+            </button>
+          )}
           {onClose && (
             <button
               type="button"
@@ -91,6 +102,25 @@ export function SendStatusView({
             <RotateCcw size={14} /> Try Again
           </button>
         </div>
+      </div>
+    );
+  }
+
+  if (step === "uncertain") {
+    return (
+      <div role="alert" className="flex flex-col items-center justify-center py-8 px-4 gap-6 text-center">
+        <div className="w-16 h-16 rounded-full bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
+          <AlertOctagon size={32} />
+        </div>
+        <div className="flex flex-col gap-2 max-w-sm">
+          <h3 className="text-white text-lg font-bold uppercase tracking-wide">Check transfer status</h3>
+          <p className="text-amber-200 text-xs bg-amber-950/40 border border-amber-800/40 rounded-xl p-3 leading-relaxed">
+            {errorMessage}
+          </p>
+        </div>
+        <button type="button" onClick={onRetry} className="flex items-center justify-center gap-1.5 bg-[#11212E] hover:bg-[#172B3A] text-white text-xs font-bold uppercase px-4 py-3 rounded-xl border border-[#172B3A]">
+          Return to send form
+        </button>
       </div>
     );
   }

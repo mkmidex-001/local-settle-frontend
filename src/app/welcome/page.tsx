@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import {
@@ -17,6 +17,7 @@ import { useWalletAvailability } from "../../features/wallet/presentation/hooks/
 import { walletOptions } from "../../features/wallet/config/wallet-options";
 import { useRouter } from "next/navigation";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { walletService } from "../../features/wallet/application/wallet.service";
 
 // --- CONNECT WALLET MODAL COMPONENT (WITH TESTNET & ENVIRONMENT VALIDATION) ---
 export function ConnectWalletModal({
@@ -26,14 +27,19 @@ export function ConnectWalletModal({
   isOpen: boolean;
   onClose: () => void;
 }) {
-  const { connect, disconnect, isConnected, walletId } = useWalletContext();
-  const { availability } = useWalletAvailability();
+  const { connect, disconnect, isConnected, walletId, error } = useWalletContext();
+  const { availability, isLoading: isCheckingWallets, error: walletAvailabilityError } = useWalletAvailability();
   const router = useRouter();
   const [modalState, setModalState] = useState<
     "select" | "connecting" | "failed"
   >("select");
   const [errorMsg, setErrorMsg] = useState("");
   const [selectedWallet, setSelectedWallet] = useState<string | null>(null);
+  const [savedWalletId, setSavedWalletId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) setSavedWalletId(localStorage.getItem("wallet:provider"));
+  }, [isOpen]);
 
   // Reset modal state whenever it transitions from closed to open. Adjusting
   // state during render (rather than in an Effect) avoids the extra
@@ -107,11 +113,14 @@ export function ConnectWalletModal({
         aria-modal="true"
         aria-labelledby={dialogTitleId}
         tabIndex={-1}
+        aria-describedby={dialogTitleId}
         className="relative w-full max-w-[500px] bg-[#0C1B27] border border-[#ffffff10] rounded-[32px] p-8 md:p-10 shadow-2xl z-10 text-white animate-[fadeInUp_0.3s_ease-out_forwards]"
       >
         {/* Close Button */}
         <button
           onClick={handleClose}
+          type="button"
+          aria-label="Close wallet connection dialog"
           className="absolute top-6 right-6 text-gray-500 hover:text-white transition-colors cursor-pointer"
         >
           <svg
@@ -137,6 +146,28 @@ export function ConnectWalletModal({
             <p className="text-gray-400 text-sm leading-relaxed mb-6">
               Choose your preferred Stellar provider to access the LocalSettle ecosystem.
             </p>
+{error?.includes("saved wallet is temporarily unavailable") && (
+              <p role="status" className="mb-4 rounded-xl border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100">
+                {error} Select your wallet below to retry.
+              </p>
+            )}
+            {savedWalletId && (
+              <button
+                type="button"
+                onClick={() => {
+                  walletService.forgetWalletSelection();
+                  setSavedWalletId(null);
+                }}
+                className="mb-4 text-sm text-[#55D6BE] underline underline-offset-4 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+              >
+                Forget saved wallet selection
+              </button>
+            )}
+            )}
+
+            <div className="mb-6 rounded-2xl border border-[#55D6BE]/25 bg-[#55D6BE]/10 p-4 text-sm leading-relaxed text-[#C2C7D0]">
+              <p><strong className="text-white">Wallet signatures</strong> verify that you control your address when you log in. A separate transaction signature approves a payment, and your wallet shows its details before you approve it. LocalSettle never asks for your secret or recovery phrase.</p>
+            </div>
 
             {/* Development Disclaimer Banner */}
             <div className="mb-6 bg-blue-500/10 border border-blue-500/20 rounded-2xl p-4 flex gap-3 text-sm text-blue-200">
@@ -202,6 +233,16 @@ export function ConnectWalletModal({
                   <span className="bg-[#0C1B27] px-2 text-gray-500 uppercase tracking-wider">Or connect to Testnet</span>
                 </div>
               </div>
+
+              {walletAvailabilityError ? (
+                <p role="status" className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+                  {walletAvailabilityError}
+                </p>
+              ) : !isCheckingWallets && !Object.values(availability).some(Boolean) ? (
+                <p role="status" className="rounded-xl border border-white/10 bg-white/5 p-3 text-xs text-gray-300">
+                  No supported wallet was detected. Install one of the listed wallets to connect; you can still browse the app without connecting.
+                </p>
+              ) : null}
 
               {/* Wallet Options — driven by the shared Stellar Wallets Kit config,
                   so adding a wallet only means editing config/wallet-options.ts.

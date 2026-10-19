@@ -1,9 +1,12 @@
 import { stellarWalletKitService } from "./stellar-wallet-kit.service";
 import { ApiError, apiFetch } from "@/lib/api";
+import { walletOptions } from "../config/wallet-options";
+import { getStellarNetworkConfig } from "../config/stellar-network";
 
 // Última wallet usada
 const WALLET_ID_KEY = "wallet:provider";
 const PUBLICKEY_KEY = "wallet:publicKey";
+const WALLET_CONNECT_TIMEOUT_MS = 30_000;
 
 interface ChallengeResponse {
     challenge: string;
@@ -17,7 +20,12 @@ interface LoginResponse {
 }
 
 function normalizeSignature(signature: string): string {
-    return signature.trim();
+    const value = signature.trim();
+    const validBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+    if (!value || value.length % 4 !== 0 || !validBase64.test(value)) {
+        throw new Error("The wallet returned an invalid signature. Reconnect and sign the login request again.");
+    }
+    return value;
 }
 
 function isExpiredChallengeError(error: unknown): boolean {
@@ -28,7 +36,15 @@ function isExpiredChallengeError(error: unknown): boolean {
     return message.toLowerCase().includes("expired");
 }
 
-let authInFlight: Promise<string> | null = null;
+function isRevokedWalletAccess(error: unknown): boolean {
+    if (typeof error !== "object" || error === null) return false;
+    const value = error as { message?: unknown; code?: unknown };
+    const message = typeof value.message === "string" ? value.message.toLowerCase() : "";
+    return message.includes("permission revoked") || message.includes("access revoked") ||
+        message.includes("permission denied") || message.includes("unauthorized");
+}
+
+const authInFlight = new Map<string, Promise<string>>();
 
 async function requestChallenge(publicKey: string): Promise<ChallengeResponse> {
     return apiFetch<ChallengeResponse>("/auth/challenge", {
@@ -69,6 +85,10 @@ export const walletService = {
         const savedPublicKey = localStorage.getItem(PUBLICKEY_KEY);
 
         if (!savedWalletId || !savedPublicKey) return null;
+        if (!walletOptions.some((wallet) => wallet.enabled && wallet.id === savedWalletId)) {
+            this.clearSession();
+            return null;
+        }
 
         try {
             stellarWalletKitService.setWallet(savedWalletId);
@@ -80,15 +100,32 @@ export const walletService = {
             }
 
             return { publicKey: address, walletId: savedWalletId };
-        } catch {
-            this.clearSession();
+        } catch (error) {
+            // A temporarily unavailable extension must not erase the saved
+            // provider and account. The caller stays disconnected and can
+            // retry when the wallet becomes available again.
+            if (isRevokedWalletAccess(error)) this.clearSession();
             return null;
         }
     },
 
     // Conecta la wallet indicada a través de Stellar Wallets Kit
     async connect(walletId: string): Promise<string> {
-        const publicKey = await stellarWalletKitService.connect(walletId);
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        let publicKey: string;
+        try {
+            publicKey = await Promise.race([
+                stellarWalletKitService.connect(walletId),
+                new Promise<never>((_, reject) => {
+                    timeoutId = setTimeout(
+                        () => reject(new Error("Wallet connection timed out. Please try again.")),
+                        WALLET_CONNECT_TIMEOUT_MS,
+                    );
+                }),
+            ]);
+        } finally {
+            if (timeoutId) clearTimeout(timeoutId);
+        }
 
         localStorage.setItem(WALLET_ID_KEY, walletId);
         localStorage.setItem(PUBLICKEY_KEY, publicKey);
@@ -109,19 +146,23 @@ export const walletService = {
     },
 
     getExpectedNetwork() {
-        const raw = (process.env.NEXT_PUBLIC_STELLAR_NETWORK || "testnet").toLowerCase();
-        return raw === "mainnet" || raw === "public" ? "mainnet" : "testnet";
+        return getStellarNetworkConfig().network;
     },
 
     async authenticate(publicKey: string): Promise<string> {
-        if (authInFlight) {
-            return authInFlight;
-        }
+        const existingAttempt = authInFlight.get(publicKey);
+        if (existingAttempt) return existingAttempt;
 
-        authInFlight = (async () => {
+        const attempt = (async () => {
             let currentChallenge = "";
 
             try {
+            const walletId = localStorage.getItem(WALLET_ID_KEY);
+            if (!walletId) throw new Error("No wallet connected");
+            if (!stellarWalletKitService.supportsMessageSigning(walletId)) {
+                throw new Error("This wallet does not support SEP-43 message signing. Choose a wallet that supports message signing to sign in.");
+            }
+
                 const challengeResponse = await requestChallenge(publicKey);
                 currentChallenge = challengeResponse.challenge;
 
@@ -157,10 +198,11 @@ export const walletService = {
             }
         })();
 
+        authInFlight.set(publicKey, attempt);
         try {
-            return await authInFlight;
+            return await attempt;
         } finally {
-            authInFlight = null;
+            if (authInFlight.get(publicKey) === attempt) authInFlight.delete(publicKey);
         }
     },
 
@@ -168,6 +210,10 @@ export const walletService = {
         localStorage.removeItem(WALLET_ID_KEY);
         localStorage.removeItem(PUBLICKEY_KEY);
         void stellarWalletKitService.disconnect();
+    },
+
+    forgetWalletSelection() {
+        this.clearSession();
     },
 };
 
